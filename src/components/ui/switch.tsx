@@ -3,10 +3,12 @@
 import * as React from "react"
 import { cn } from "cn"
 import { Switch as SwitchPrimitive } from "radix-ui"
+import { playSound } from "@/lib/audio/sound-engine"
 
 function Switch({
   className,
   size = "default",
+  onCheckedChange,
   ...props
 }: React.ComponentProps<typeof SwitchPrimitive.Root> & {
   size?: "sm" | "default"
@@ -20,6 +22,10 @@ function Switch({
         className
       )}
       {...props}
+      onCheckedChange={(checked) => {
+        playSound(checked ? "toggleOn" : "toggleOff")
+        onCheckedChange?.(checked)
+      }}
     >
       <SwitchPrimitive.Thumb
         data-slot="switch-thumb"

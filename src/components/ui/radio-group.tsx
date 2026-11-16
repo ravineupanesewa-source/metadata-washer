@@ -3,9 +3,11 @@
 import * as React from "react"
 import { cn } from "cn"
 import { RadioGroup as RadioGroupPrimitive } from "radix-ui"
+import { playSound } from "@/lib/audio/sound-engine"
 
 function RadioGroup({
   className,
+  onValueChange,
   ...props
 }: React.ComponentProps<typeof RadioGroupPrimitive.Root>) {
   return (
@@ -13,6 +15,10 @@ function RadioGroup({
       data-slot="radio-group"
       className={cn("grid w-full gap-2", className)}
       {...props}
+      onValueChange={(value) => {
+        playSound("select")
+        onValueChange?.(value)
+      }}
     />
   )
 }

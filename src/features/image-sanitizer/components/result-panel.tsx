@@ -1,15 +1,18 @@
 "use client";
 
-import { Archive, CircleAlert, CircleCheck, Download, Info, RefreshCw, RotateCcw } from "lucide-react";
+import { Archive, ArrowDown, CircleAlert, CircleCheck, Download, Info, RefreshCw, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { QueueSummary } from "../hooks/use-sanitizer-queue";
-import { CATEGORY_LABELS, copy } from "../strings";
+import { CATEGORY_LABELS, beforeAfter, copy } from "../strings";
 import type { QueueItem } from "../types/queue";
 import { formatBytes } from "../utils/format";
 import { buildResultsZip, triggerDownload, zipFilename } from "../utils/zip";
+import { impactOf } from "@/features/support/support-impact";
+import { requestSupport } from "@/features/support/support-store";
+import { playSound } from "@/lib/audio/sound-engine";
 
 interface ResultPanelProps {
   items: readonly QueueItem[];
@@ -18,13 +21,15 @@ interface ResultPanelProps {
   focusOnMount: boolean;
   onRetryFailed: () => void;
   onReset: () => void;
+  /** Present when there is a before/after to show below the stage. */
+  onCompare?: () => void;
 }
 
 /**
  * Real results only: the featured preview is the cleaned output blob, the
  * download is that exact blob, and categories come from the server report.
  */
-export function ResultPanel({ items, summary, focusOnMount, onRetryFailed, onReset }: ResultPanelProps) {
+export function ResultPanel({ items, summary, focusOnMount, onRetryFailed, onReset, onCompare }: ResultPanelProps) {
   const [zipping, setZipping] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const featured = items.find((i) => (i.status === "success" || i.status === "partial") && i.output && i.report);
@@ -38,12 +43,15 @@ export function ResultPanel({ items, summary, focusOnMount, onRetryFailed, onRes
   }, [focusOnMount]);
 
   async function downloadAll() {
+    playSound("zip");
     setZipping(true);
     try {
       const blob = await buildResultsZip(items);
       const url = URL.createObjectURL(blob);
       triggerDownload(url, zipFilename());
       setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      playSound("download");
+      requestSupport(impactOf(items));
     } finally {
       setZipping(false);
     }
@@ -130,10 +138,21 @@ export function ResultPanel({ items, summary, focusOnMount, onRetryFailed, onRes
           <div className="flex flex-wrap gap-2">
             {featured?.output && (
               <Button asChild size="lg" className="h-11 rounded-xl px-5">
-                <a href={featured.output.url} download={featured.output.filename}>
+                {/* The download always happens; the optional support card can appear afterwards. */}
+                <a href={featured.output.url} download={featured.output.filename} onClick={() => {
+                    playSound("download");
+                    requestSupport(impactOf([featured]));
+                  }}
+                >
                   <Download aria-hidden />
                   {copy.result.download}
                 </a>
+              </Button>
+            )}
+            {onCompare && (
+              <Button variant="outline" size="lg" className="h-11 rounded-xl" onClick={onCompare} data-testid="compare-link">
+                <ArrowDown aria-hidden />
+                {beforeAfter.jump}
               </Button>
             )}
             {downloadable > 1 && (

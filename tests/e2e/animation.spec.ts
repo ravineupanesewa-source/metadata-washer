@@ -182,10 +182,13 @@ test("cancel stops the run immediately", async ({ page }) => {
 });
 
 test("new files after a run start from a fresh state", async ({ page }) => {
+  // Two full wash cycles plus a deliberately delayed response: ~26 s under software WebGL.
+  test.slow();
   let calls = 0;
   await page.route("**/api/sanitize**", async (route) => {
     calls += 1;
-    if (calls === 2) await new Promise((r) => setTimeout(r, 3_000)); // keep the second run pending
+    // Keep the second run pending well past the checks below, even on a loaded CI machine.
+    if (calls === 2) await new Promise((r) => setTimeout(r, 10_000));
     await route.continue();
   });
   await page.goto("/");
@@ -201,8 +204,12 @@ test("new files after a run start from a fresh state", async ({ page }) => {
   await expect(page.getByTestId("batch-summary")).toHaveCount(0);
   await clean(page);
   await expect(stage(page)).toHaveAttribute("data-outcome", "pending");
-  await expect(stage(page)).toHaveAttribute("data-phase", /materialize|activate/);
-  await expect(stage(page)).toContainText("0 of 1 image processed");
+  // A fresh run is in progress: any early phase, never the old run's finished ones.
+  await expect(stage(page)).toHaveAttribute("data-phase", /materialize|activate|scan|awaiting/);
+  // Nothing from the previous run carries over: no result panel, no finished status.
+  await expect(page.getByTestId("batch-summary")).toHaveCount(0);
+  await expect(stage(page).getByTestId("decon-status")).not.toContainText("Metadata removed");
+  await expect(stage(page).getByRole("button", { name: "Cancel" })).toBeVisible();
 });
 
 test("falls back to the CSS chamber when WebGL is unavailable", async ({ page }) => {

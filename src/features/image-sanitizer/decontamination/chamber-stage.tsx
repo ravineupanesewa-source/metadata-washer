@@ -2,7 +2,8 @@
 
 import { CircleAlert, CircleCheck, ImagePlus, Info, Plus, ShieldCheck, Square } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { preload } from "react-dom";
 import { useDropzone } from "react-dropzone";
 import { Button } from "@/components/ui/button";
 import type { PublicLimits } from "@/lib/config/limits";
@@ -10,11 +11,14 @@ import { SUPPORTED_FORMATS, acceptMap } from "@/lib/image/capabilities";
 import { cn } from "@/lib/utils";
 import type { ExperienceView } from "../hooks/use-decontamination";
 import { copy } from "../strings";
-import { usePerfTier } from "@/lib/perf/perf-tier";
+import { prefersLightweight, useCoarsePointer } from "@/lib/device/device-hints";
+import { holdPerfProbe, usePerfTier } from "@/lib/perf/perf-tier";
 import { useIntake } from "../intake";
 import { formatBytes } from "../utils/format";
-import { pickTier } from "./chamber-config";
+import { playSound } from "@/lib/audio/sound-engine";
+import { WASHER_MODEL_URL, pickTier } from "./chamber-config";
 import { ChamberFallback } from "./chamber-fallback";
+import { StagePreloader } from "./stage-preloader";
 import type { ChamberSubject, StageMode } from "./washer-scene";
 import type { DecontaminationRun } from "./run";
 import { nominalDuration } from "./timeline";
@@ -22,14 +26,26 @@ import { nominalDuration } from "./timeline";
 /** WebGL scene is client-only and code-split: three.js never blocks first paint or runs on the server. */
 const ChamberCanvas = dynamic(() => import("./chamber-canvas"), { ssr: false, loading: () => null });
 
+/**
+ * The frame-rate probe must time the washer actually rendering, not a page still
+ * downloading the model (which would always read "fast"). Held from module load
+ * until the stage has booted; there is one stage per page.
+ */
+const releasePerfProbe = typeof window === "undefined" ? () => undefined : holdPerfProbe();
+
 const FORMAT_LIST = SUPPORTED_FORMATS.map((f) => f.label.split(" ")[0]).join(", ");
 const ACCEPT_ATTR = Object.entries(acceptMap())
   .flatMap(([mime, exts]) => [mime, ...exts])
   .join(",");
 
 let webglSupport: boolean | null = null;
+/**
+ * WebGL is used only when it works AND the user isn't saving data: the 3D washer costs
+ * ~3 MB of model plus ~900 KB of three.js, which the CSS chamber doesn't need at all.
+ */
 function detectWebGL(): boolean {
   if (webglSupport === null) {
+    if (prefersLightweight()) return (webglSupport = false);
     try {
       const canvas = document.createElement("canvas");
       webglSupport = !!(canvas.getContext("webgl2") ?? canvas.getContext("webgl"));
@@ -55,6 +71,8 @@ interface ChamberStageProps {
   run: DecontaminationRun | null;
   view: ExperienceView;
   subject: StageSubject | null;
+  /** Every photo the washer should show: the ready batch, or the run's files with their own results. */
+  garments: readonly ChamberSubject[];
   reduced: boolean;
   readyCount: number;
   /** Anything in the queue (ready, invalid, cancelled…): the start button stays in place. */
@@ -79,8 +97,12 @@ export function ChamberStage(props: ChamberStageProps) {
   const resolved = running && view.outcome !== null;
   const showResult = mode === "finished" || (running && (view.outcome === "error" || view.phase === "clear" || view.phase === "complete"));
 
-  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
-    onDrop: (accepted) => accepted.length > 0 && props.onFiles(accepted),
+  const dropped = useRef(false);
+  const { getRootProps, getInputProps, isDragActive, open: openPicker } = useDropzone({
+    onDrop: (accepted) => {
+      dropped.current = true;
+      if (accepted.length > 0) props.onFiles(accepted);
+    },
     noClick: true,
     noKeyboard: true,
     // `noDrag`, not `disabled`: dropzone's disabled state sets aria-disabled on the whole stage,
@@ -88,7 +110,24 @@ export function ChamberStage(props: ChamberStageProps) {
     noDrag: running,
     multiple: true,
   });
-  const stageMode: StageMode = isDragActive && !running ? "drag" : mode;
+  const dragging = isDragActive && !running;
+  const stageMode: StageMode = dragging ? "drag" : mode;
+  // Files hovering over the washer swell in; dragging them away again falls off (a drop has its own sound).
+  const wasDragging = useRef(false);
+  useEffect(() => {
+    if (dragging === wasDragging.current) return;
+    wasDragging.current = dragging;
+    if (dragging) {
+      dropped.current = false;
+      playSound("dragEnter");
+    } else if (!dropped.current) {
+      playSound("dragLeave");
+    }
+  }, [dragging]);
+  const open = useCallback(() => {
+    playSound("pick");
+    openPicker();
+  }, [openPicker]);
   // The hero pill and header CTA can open this picker (only while not mid-run).
   useIntake({ onOpenPicker: () => !running && open() });
   const perf = usePerfTier();
@@ -96,17 +135,28 @@ export function ChamberStage(props: ChamberStageProps) {
   // Renderer: WebGL when available and healthy; otherwise the CSS chamber.
   const webgl = useSyncExternalStore(noopSubscribe, detectWebGL, () => null);
   const [failed, setFailed] = useState(false);
+  // Stable callbacks: the canvas is memoised and must not re-render on every queue tick.
+  const handleFailure = useCallback(() => setFailed(true), []);
   const renderer = webgl === null ? "pending" : webgl && !failed ? "webgl" : "fallback";
+  // Start the model download now, in parallel with the three.js chunk, but only when the
+  // 3D washer will actually render (not for the CSS fallback or data-saving users).
+  // Matches GLTFLoader's request (CORS mode, same-origin credentials) so the preload is reused.
+  if (renderer === "webgl") preload(WASHER_MODEL_URL, { as: "fetch", crossOrigin: "anonymous" });
+  const touch = useCoarsePointer();
 
   // Preloader: covers the stage until the washer has drawn (or we fell back to CSS).
   // A slow GPU never locks people out: after a few seconds the controls appear anyway.
   const [sceneReady, setSceneReady] = useState(false);
+  const handleReady = useCallback(() => setSceneReady(true), []);
   const [loadTimedOut, setLoadTimedOut] = useState(false);
   useEffect(() => {
     const timer = setTimeout(() => setLoadTimedOut(true), 8000);
     return () => clearTimeout(timer);
   }, []);
   const booted = renderer === "fallback" || sceneReady || loadTimedOut;
+  useEffect(() => {
+    if (booted) releasePerfProbe();
+  }, [booted]);
 
   // Quality tier from the stage width (phones get a lighter scene).
   const viewport = useRef<HTMLDivElement | null>(null);
@@ -133,15 +183,6 @@ export function ChamberStage(props: ChamberStageProps) {
     if (resolved) showRef.current?.focus();
   }, [resolved]);
 
-  // Stable per queue item, so the scene decodes each photo exactly once.
-  const subjectKey = subject?.key;
-  const subjectFile = subject?.file;
-  const subjectLabel = subject?.label;
-  const chamberSubject = useMemo<ChamberSubject | null>(
-    () => (subjectKey && subjectFile && subjectLabel ? { key: subjectKey, file: subjectFile, label: subjectLabel } : null),
-    [subjectKey, subjectFile, subjectLabel],
-  );
-
   const status = running
     ? showResult
       ? resultTitle(view.outcome)
@@ -152,7 +193,9 @@ export function ChamberStage(props: ChamberStageProps) {
         ? copy.stage.ready(readyCount, modeLabel)
         : stageMode === "drag"
           ? copy.stage.drag
-          : copy.stage.idle;
+          : touch
+            ? copy.stage.idleTouch
+            : copy.stage.idle;
 
   const line = washerLine(stageMode, running || mode === "finished", view, showResult);
 
@@ -181,17 +224,26 @@ export function ChamberStage(props: ChamberStageProps) {
         data-booted={booted}
         data-duration={run ? nominalDuration(run.config) : undefined}
       >
-        <div ref={setViewport} className="relative h-svh min-h-[520px] shrink-0">
+        {/* min-h stays below a landscape phone's height (~360 px) so the dock never drops off-screen. */}
+        <div ref={setViewport} className="relative h-svh min-h-[320px] shrink-0">
           {renderer === "webgl" && (
             <ChamberCanvas
               mode={stageMode}
               run={run}
-              subject={chamberSubject}
+              garments={props.garments}
               tier={tier}
               reduced={reduced}
-              idleMotion={perf === "high"}
-              onFailure={() => setFailed(true)}
-              onReady={() => setSceneReady(true)}
+              // Animate while the probe measures (pending) so it times real frames.
+              // The neighbouring machines are there from the first frame, so the preloader
+              // reveals the whole row (none popping in seconds later); they go only if the
+              // probe says "low". The costly extras (shadow maps, the reflection environment,
+              // the richer room shader) wait for "high": they would slow the first frame on
+              // weak GPUs, and they ease in where a pop wouldn't be noticed.
+              idleMotion={perf !== "low"}
+              rich={perf === "high"}
+              neighbours={perf !== "low"}
+              onFailure={handleFailure}
+              onReady={handleReady}
             />
           )}
           {renderer === "fallback" && (
@@ -216,13 +268,14 @@ export function ChamberStage(props: ChamberStageProps) {
             <p
               key={line}
               aria-hidden
-              className="pointer-events-none max-w-sm rounded-xl bg-black/70 px-4 py-2 text-center font-mono text-[13px] leading-snug tracking-wide text-ember uppercase ring-1 ring-ember/30 backdrop-blur animate-in fade-in slide-in-from-bottom-1 motion-reduce:animate-none"
+              className="pointer-events-none max-w-sm rounded-xl bg-black/80 px-4 py-2 text-center font-mono text-[13px] leading-snug tracking-wide text-ember uppercase ring-1 ring-ember/30 animate-in fade-in slide-in-from-bottom-1 motion-reduce:animate-none"
             >
               {line}
             </p>
 
-            {/* Control dock */}
-            <div className="flex w-full max-w-xl flex-col gap-3 rounded-2xl bg-stage-raised/85 p-3 shadow-[0_0_48px_-16px] shadow-ember/40 ring-1 ring-ember/25 backdrop-blur-xl sm:flex-row sm:items-center sm:pl-5">
+            {/* Control dock. Solid-ish fill, no backdrop blur: the canvas behind it repaints every
+                frame, and a blur over it would be recomputed by the compositor on each one. */}
+            <div className="flex w-full max-w-xl flex-col gap-3 rounded-2xl bg-stage-raised/95 p-3 shadow-[0_0_48px_-16px] shadow-ember/40 ring-1 ring-ember/25 sm:flex-row sm:items-center sm:pl-5">
               <div className="min-w-0 flex-1">
                 {subject && (
                   <p className="truncate text-xs text-white/55" title={subject.name}>
@@ -353,50 +406,6 @@ function resultBody(outcome: ExperienceView["outcome"], partial: boolean, error:
   if (outcome === "error") return error ?? copy.decon.result.error.body;
   if (outcome === "no-metadata") return copy.decon.result["no-metadata"].body;
   return partial ? `${copy.decon.result.clean.body} ${copy.decon.result.partial}` : copy.decon.result.clean.body;
-}
-
-/** Washer-door loader shown while three.js and the scene load; fades out, then unmounts. */
-function StagePreloader({ done }: { done: boolean }) {
-  const [gone, setGone] = useState(false);
-  useEffect(() => {
-    if (!done) return;
-    const timer = setTimeout(() => setGone(true), 600); // after the fade
-    return () => clearTimeout(timer);
-  }, [done]);
-  if (gone) return null;
-  return (
-    <div
-      data-testid="stage-preloader"
-      className={cn(
-        "absolute inset-0 z-20 grid place-items-center bg-stage transition-opacity duration-500 ease-out motion-reduce:transition-none",
-        done ? "pointer-events-none opacity-0" : "opacity-100",
-      )}
-    >
-      <div role="status" aria-live="polite" className="flex flex-col items-center gap-6">
-        <div className="relative size-28" aria-hidden>
-          {/* Door rim */}
-          <div className="absolute inset-0 rounded-full bg-stage-raised ring-1 ring-white/10 shadow-[0_0_60px_-10px] shadow-ember/30" />
-          {/* Spinning drum arc */}
-          <div className="absolute inset-2 animate-spin rounded-full bg-[conic-gradient(from_0deg,transparent_0deg,var(--color-ember)_80deg,transparent_140deg)] [animation-duration:1.1s] motion-reduce:animate-none" />
-          {/* Glass */}
-          <div className="absolute inset-3.5 overflow-hidden rounded-full bg-[radial-gradient(circle_at_35%_30%,#3a2416,#0d0a08_70%)] ring-1 ring-white/10">
-            {[
-              { left: "28%", delay: "0s", size: "size-2" },
-              { left: "52%", delay: "0.8s", size: "size-1.5" },
-              { left: "68%", delay: "1.5s", size: "size-2.5" },
-            ].map((b) => (
-              <span
-                key={b.left}
-                className={cn("absolute bottom-2 animate-bubble rounded-full border border-ember/60 bg-ember/10 motion-reduce:hidden", b.size)}
-                style={{ left: b.left, animationDelay: b.delay }}
-              />
-            ))}
-          </div>
-        </div>
-        <p className="font-mono text-[13px] tracking-widest text-ember/90 uppercase">{copy.stage.loading}</p>
-      </div>
-    </div>
-  );
 }
 
 function StatusIcon({ running, showResult, outcome }: { running: boolean; showResult: boolean; outcome: ExperienceView["outcome"] }) {

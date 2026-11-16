@@ -8,7 +8,11 @@ RUN npm ci
 
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
+# Baked into prerendered pages (canonical URLs, Open Graph, sitemap): pass with
+#   docker build --build-arg NEXT_PUBLIC_SITE_URL=https://your.domain .
+ARG NEXT_PUBLIC_SITE_URL
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NEXT_PUBLIC_SITE_URL=${NEXT_PUBLIC_SITE_URL}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

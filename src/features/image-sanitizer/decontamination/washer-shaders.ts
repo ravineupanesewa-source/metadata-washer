@@ -5,7 +5,12 @@
 
 /* ---------------------------------------------------------------- floor --- */
 
-/** World-space graphite tiles with glowing ember grout, a light pool from the wall panel and a soft vignette. */
+/**
+ * Glossy dark floor: large tiles with fine anti-aliased seams, a glowing pad ring
+ * under the washer that sends ripples across the floor as it works, and the
+ * contact shadow and water glow from the machines. Accent colour and energy
+ * follow the wash (lavender working, cyan clean, red fault).
+ */
 export const floorVertex = /* glsl */ `
   varying vec3 vWorld;
   void main() {
@@ -20,34 +25,37 @@ export const floorFragment = /* glsl */ `
   uniform vec3 uLight;
   uniform vec3 uGlow;
   uniform float uGlowStrength;
+  uniform vec3 uAccent;
+  uniform float uEnergy;
   varying vec3 vWorld;
 
-  float tile(vec2 p) {
-    vec2 c = floor(p);
-    return mod(c.x + c.y, 2.0);
-  }
-
   void main() {
-    vec2 p = vWorld.xz * 1.6;
-    // Grout lines and slightly worn tiles.
-    vec2 f = abs(fract(p) - 0.5);
-    float grout = smoothstep(0.485, 0.5, max(f.x, f.y));
-    float checker = tile(p);
-    vec3 dark = vec3(0.10, 0.105, 0.12);
-    vec3 light = vec3(0.24, 0.25, 0.28);
-    vec3 col = mix(dark, light, checker);
-    col = mix(col, vec3(0.02), grout * 0.6);
+    vec2 p = vWorld.xz;
+    vec3 col = vec3(0.016, 0.017, 0.021);
 
-    // Warm light pool falling from the window (back right) toward the washer.
-    vec2 pool = vWorld.xz - vec2(0.9, 1.6);
+    // Large tiles; seams anti-aliased with screen-space derivatives so they don't shimmer.
+    vec2 g = p * 0.85;
+    vec2 f = abs(fract(g) - 0.5);
+    float fw = fwidth(g.x) + fwidth(g.y);
+    float seam = smoothstep(0.5 - fw * 1.5, 0.5, max(f.x, f.y));
+    col = mix(col, vec3(0.004), seam * 0.7);
+
+    // Soft key light pooled in front of the washer.
+    vec2 pool = p - vec2(0.6, 1.8);
     pool.x *= 0.55;
-    float lightPool = exp(-dot(pool, pool) * 0.35);
-    col *= 0.45 + lightPool * 0.9 * uLight;
-    // Grout seams glow faintly near the machines.
-    col += uLight * grout * 0.22 * exp(-dot(vWorld.xz - vec2(0.0, 1.2), vWorld.xz - vec2(0.0, 1.2)) * 0.12);
+    col *= 0.55 + exp(-dot(pool, pool) * 0.3) * 1.1 * uLight;
 
-    // Glow under the washer while it works (water light leaking out).
-    float under = exp(-dot(vWorld.xz - vec2(0.0, 1.1), vWorld.xz - vec2(0.0, 1.1)) * 1.4);
+    // Pad under the washer: a glowing ring, ripples rolling outward faster as it works.
+    float r = length(p - vec2(0.0, 0.1));
+    float pad = smoothstep(0.025, 0.0, abs(r - 1.25)) + exp(-abs(r - 1.25) * 9.0) * 0.25;
+    float wave = fract(r * 0.55 - uTime * (0.12 + uEnergy * 0.7));
+    float ripple = exp(-pow((wave - 0.5) * 9.0, 2.0)) * smoothstep(5.5, 1.4, r) * step(1.3, r);
+    col += uAccent * (pad * (0.35 + 0.65 * uEnergy) + ripple * (0.05 + 0.28 * uEnergy));
+    // Seams near the pad pick up the accent.
+    col += uAccent * seam * 0.12 * exp(-r * 0.5);
+
+    // Water light leaking out under the washer while it works.
+    float under = exp(-dot(p - vec2(0.0, 1.1), p - vec2(0.0, 1.1)) * 1.4);
     col += uGlow * under * uGlowStrength * 0.35;
 
     // Contact shadow under the machines.
@@ -55,8 +63,7 @@ export const floorFragment = /* glsl */ `
     col *= mix(1.0, 0.55, shadow * step(vWorld.z, 1.4));
 
     // Fade into the room.
-    float dist = length(vWorld.xz - vec2(0.0, 1.5));
-    col *= smoothstep(9.0, 2.0, dist);
+    col *= smoothstep(9.0, 2.0, length(p - vec2(0.0, 1.5)));
     gl_FragColor = vec4(col, 1.0);
     #include <colorspace_fragment>
   }
@@ -64,12 +71,16 @@ export const floorFragment = /* glsl */ `
 
 /* ----------------------------------------------------------------- wall --- */
 
-/** Back wall: graphite panels, an ember neon band and a glowing light panel. */
+/**
+ * Back wall: hexagonal armour panels with bevelled rims, a few cells glowing and
+ * breathing (more wake up while the washer works), energy pulses rippling out
+ * through the seams from behind the machine, a HUD "reactor" ring framing the
+ * washer, and light pillars at the far edges. Values are linear: they read dark.
+ * With LITE defined (slow devices) only the panels and the main rings are drawn.
+ */
 export const wallVertex = /* glsl */ `
-  varying vec2 vUv;
   varying vec3 vWorld;
   void main() {
-    vUv = uv;
     vec4 world = modelMatrix * vec4(position, 1.0);
     vWorld = world.xyz;
     gl_Position = projectionMatrix * viewMatrix * world;
@@ -78,84 +89,96 @@ export const wallVertex = /* glsl */ `
 
 export const wallFragment = /* glsl */ `
   uniform float uTime;
-  uniform vec3 uWindow;
-  varying vec2 vUv;
+  uniform vec3 uAccent;
+  uniform float uEnergy;
   varying vec3 vWorld;
 
-  float box(vec2 p, vec2 b) {
-    vec2 d = abs(p) - b;
-    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+  const float TAU = 6.2831853;
+  const vec2 HEX = vec2(1.0, 1.7320508);
+  const vec2 CORE = vec2(0.0, 1.35);   // behind the washer's porthole
+
+  float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+  }
+
+  // Nearest hexagon: xy = position inside the cell, zw = cell id.
+  vec4 hexCell(vec2 uv) {
+    vec4 c = floor(vec4(uv, uv - vec2(0.5, 1.0)) / HEX.xyxy) + 0.5;
+    vec4 h = vec4(uv - c.xy * HEX, uv - (c.zw + 0.5) * HEX);
+    return dot(h.xy, h.xy) < dot(h.zw, h.zw) ? vec4(h.xy, c.xy) : vec4(h.zw, c.zw + 0.5);
+  }
+  // 0 at a cell's centre, 0.5 on its edge.
+  float hexDist(vec2 p) {
+    p = abs(p);
+    return max(dot(p, normalize(HEX)), p.x);
   }
 
   void main() {
-    // Upper wall: large graphite panels with dark seams (linear values: these read as near-black).
-    vec3 panel = mix(vec3(0.012, 0.013, 0.017), vec3(0.03, 0.031, 0.038), smoothstep(0.0, 4.5, vWorld.y));
-    vec2 pf = abs(fract(vec2(vWorld.x / 1.6, (vWorld.y - 1.1) / 1.2)) - 0.5);
-    panel *= 1.0 - smoothstep(0.485, 0.5, max(pf.x, pf.y)) * 0.6;
-    // Lower wall: small dark tiles below 1.1m.
-    float lower = step(vWorld.y, 1.1);
-    vec2 t = vec2(vWorld.x * 3.0, vWorld.y * 3.0);
-    vec2 tf = abs(fract(t) - 0.5);
-    float tileLine = smoothstep(0.46, 0.5, max(tf.x, tf.y));
-    vec3 tiles = mix(vec3(0.02, 0.021, 0.026), vec3(0.008, 0.008, 0.01), tileLine);
-    vec3 col = mix(panel, tiles, lower);
-    // Ember neon band just above the machines, with a soft spill, gently pulsing.
-    float band = abs(vWorld.y - 2.75);
-    float pulse = 0.85 + 0.15 * sin(uTime * 1.3);
-    col += uWindow * (smoothstep(0.018, 0.0, band) * 1.4 + exp(-band * 5.0) * 0.12) * pulse;
+    vec2 w = vWorld.xy;
+    vec2 q = w - CORE;
+    float r = length(q);
 
-    // Light panel (four glowing cells) with a soft bloom around it.
-    vec2 w = vWorld.xy - vec2(3.4, 3.0);
-    float frame = box(w, vec2(1.35, 0.9));
-    vec2 pane = abs(fract((w + vec2(1.35, 0.9)) / vec2(0.675, 0.9)) - 0.5);
-    float mullion = smoothstep(0.47, 0.5, max(pane.x, pane.y));
-    float inside = step(frame, 0.0);
-    vec3 sky = mix(uWindow, uWindow * vec3(1.0, 0.82, 0.62), clamp(w.y * 0.5 + 0.5, 0.0, 1.0));
-    col = mix(col, sky * 1.1, inside * (1.0 - mullion * 0.85));
-    col += uWindow * exp(-max(frame, 0.0) * 2.2) * 0.35 * (1.0 - inside);
+    // Deep graphite, a touch lighter behind the washer.
+    vec3 col = mix(vec3(0.006, 0.0065, 0.009), vec3(0.02, 0.021, 0.027), exp(-r * r * 0.07));
+
+    // Hex armour panels.
+    vec4 h = hexCell(w / 0.42);
+    float d = hexDist(h.xy);
+    float fw = fwidth(d);
+    float edge = smoothstep(0.5 - fw * 2.5, 0.5, d + 0.02);
+    float rim = smoothstep(0.3, 0.46, d) * (1.0 - edge);
+    col *= 1.0 + rim * 0.7;
+    col = mix(col, vec3(0.002), edge * 0.85);
+
+#ifndef LITE
+    // A few cells glow and breathe; more of them wake up while the washer works.
+    float id = hash21(h.zw);
+    float awake = step(0.94 - uEnergy * 0.1, id);
+    float breathe = 0.5 + 0.5 * sin(uTime * (0.5 + id * 1.3) + id * 40.0);
+    float fill = awake * breathe * (1.0 - smoothstep(0.2, 0.46, d)) * smoothstep(6.0, 1.5, r);
+    col += uAccent * fill * (0.04 + 0.12 * uEnergy);
+
+    // Energy pulses rolling outward through the seams from behind the machine.
+    float wave = fract(r * 0.3 - uTime * (0.08 + uEnergy * 0.45));
+    float pulse = exp(-pow((wave - 0.5) * 10.0, 2.0));
+    col += uAccent * edge * (0.05 * exp(-r * 0.35) + pulse * (0.06 + 0.3 * uEnergy) * smoothstep(6.5, 1.8, r));
+#else
+    col += uAccent * edge * 0.05 * exp(-r * 0.35);
+#endif
+
+    // Reactor ring framing the washer: a solid ring, a rotating dashed ring and fine ticks.
+    float ang = atan(q.y, q.x) / TAU;
+    float spin = uTime * (0.02 + uEnergy * 0.12);
+    float ring = smoothstep(0.022, 0.0, abs(r - 1.75)) + exp(-abs(r - 1.75) * 8.0) * 0.3;
+    float dashes = step(0.5, fract(ang * 28.0 + spin * 4.0)) * smoothstep(0.016, 0.0, abs(r - 2.05));
+#ifndef LITE
+    float arcs = step(0.72, fract(ang * 3.0 - spin * 2.0)) * smoothstep(0.03, 0.0, abs(r - 2.3)) * 0.8;
+    float ticks = step(0.8, fract(ang * 90.0)) * smoothstep(0.05, 0.0, abs(r - 1.55)) * 0.45;
+#else
+    float arcs = 0.0;
+    float ticks = 0.0;
+#endif
+    col += uAccent * (ring * 1.1 + dashes * 0.7 + arcs + ticks) * (0.5 + 0.5 * uEnergy);
+
+#ifndef LITE
+    // Light pillars at the far edges of the room.
+    float pillar = exp(-abs(abs(w.x) - 4.6) * 14.0) * smoothstep(0.0, 3.0, w.y) * smoothstep(7.5, 3.5, w.y);
+    col += uAccent * pillar * 0.35;
+#endif
+
+    // Vignette toward the sides keeps the eye on the washer.
+    col *= 1.0 - smoothstep(3.0, 7.5, abs(w.x)) * 0.7;
 
     gl_FragColor = vec4(col, 1.0);
     #include <colorspace_fragment>
   }
 `;
 
-/* ---------------------------------------------------------------- beams --- */
-
-/** Additive light shafts from the window, with drifting noise for dusty air. */
-export const beamVertex = /* glsl */ `
-  varying vec2 vUv;
-  void main() {
-    vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-
-export const beamFragment = /* glsl */ `
-  uniform float uTime;
-  uniform vec3 uColor;
-  uniform float uIntensity;
-  varying vec2 vUv;
-
-  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-  float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
-  }
-
-  void main() {
-    float across = smoothstep(0.0, 0.35, vUv.x) * smoothstep(1.0, 0.65, vUv.x);
-    float along = smoothstep(0.0, 0.15, vUv.y) * smoothstep(1.0, 0.45, vUv.y);
-    float dust = 0.65 + 0.35 * noise(vec2(vUv.x * 6.0 + uTime * 0.05, vUv.y * 3.0 - uTime * 0.08));
-    float a = across * along * dust * uIntensity;
-    gl_FragColor = vec4(uColor * a, a);
-  }
-`;
-
 /* ---------------------------------------------------------------- motes --- */
 
-/** Dust motes drifting in the window light. Positions wrap inside a box. */
+/** Dust motes drifting in the room light. Positions wrap inside a box. */
 export const moteVertex = /* glsl */ `
   uniform float uTime;
   uniform float uSize;
@@ -514,5 +537,98 @@ export const clothFragment = /* glsl */ `
 
     gl_FragColor = vec4(col, 1.0);
     #include <colorspace_fragment>
+  }
+`;
+
+/* ----------------------------------------------------------------- dial --- */
+
+/** LED segments in the program dial's ring (the uniform array length). */
+export const DIAL_LEDS = 24;
+
+/**
+ * Face of the raised bezel around the program knob, drawn on an annulus in its
+ * own plane (position.xy in world units, centred on the knob):
+ *   inner groove → LED channel with DIAL_LEDS glowing arc segments → tick scale
+ *   (major every five) → bright chamfered lip → dark outer edge.
+ * Brushed, slightly lit from the top-left. uLed holds each segment's colour,
+ * already scaled by its brightness (black = off); lit segments spill a soft
+ * glow along the channel and into their neighbours.
+ */
+export const dialVertex = /* glsl */ `
+  varying vec2 vP;
+  void main() {
+    vP = position.xy;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+export const dialFragment = /* glsl */ `
+  #define LEDS ${DIAL_LEDS}
+  #define TAU 6.28318530718
+  uniform vec3 uLed[LEDS];
+  uniform float uInner;
+  uniform float uOuter;
+  varying vec2 vP;
+
+  float band(float x, float a, float b, float aa) {
+    return smoothstep(a - aa, a + aa, x) * (1.0 - smoothstep(b - aa, b + aa, x));
+  }
+
+  void main() {
+    float r = length(vP);
+    float u = (r - uInner) / (uOuter - uInner);
+    float aa = max(fwidth(u), 1e-4);
+    float t = fract(atan(vP.x, vP.y) / TAU); // 0 at twelve o'clock, clockwise
+    vec2 n = vP / max(r, 1e-5);
+
+    // Brushed graphite, lit from the top-left.
+    float sheen = pow(max(0.0, dot(n, normalize(vec2(-0.55, 0.85)))), 3.0);
+    vec3 col = mix(vec3(0.028, 0.03, 0.036), vec3(0.1, 0.105, 0.12), smoothstep(0.0, 1.0, u));
+    col *= 0.92 + 0.08 * sin(u * 180.0 + sin(t * TAU * 3.0) * 0.6);
+    col += sheen * 0.06;
+
+    // Inner groove where the knob sits: deep shadow fading out.
+    col *= mix(0.25, 1.0, smoothstep(0.0, 0.16, u));
+
+    // LED channel: a recessed dark slot.
+    float channel = band(u, 0.2, 0.56, aa);
+    col = mix(col, vec3(0.012, 0.012, 0.016), channel * 0.92);
+
+    // LED segments.
+    float s = t * float(LEDS) + 0.5;
+    int idx = int(mod(floor(s), float(LEDS)));
+    float side = fract(s) - 0.5;              // signed position inside the segment
+    float local = abs(side);
+    float laa = max(fwidth(s), 1e-4);
+    vec3 led = uLed[idx];
+    int nb = int(mod(float(idx) + (side > 0.0 ? 1.0 : -1.0) + float(LEDS), float(LEDS)));
+    vec3 nled = uLed[nb];
+    float seg = 1.0 - smoothstep(0.34 - laa, 0.34 + laa, local);
+    float lens = band(u, 0.26, 0.5, aa) * seg;
+    float hot = 1.0 - smoothstep(0.0, 0.14, abs(u - 0.38));
+    vec3 offLens = vec3(0.055, 0.05, 0.048) + sheen * 0.03;
+    col = mix(col, offLens + led * (1.1 + 1.3 * hot), lens);
+    // Glow along the channel and into the neighbouring segment.
+    float glowR = exp(-abs(u - 0.38) * 10.0) * channel;
+    col += led * glowR * (0.55 - local * 0.5);
+    col += nled * glowR * exp(-(1.0 - local) * 5.0) * 0.35;
+
+    // Tick scale: 60 minor, every fifth major and brighter.
+    float k = t * 60.0;
+    float major = step(mod(floor(k + 0.5), 5.0), 0.5);
+    float tickArc = abs(fract(k + 0.5) - 0.5) / 60.0 * TAU * r;
+    float tw = (uOuter - uInner) * mix(0.012, 0.022, major);
+    float tickLen = major > 0.5 ? band(u, 0.63, 0.85, aa) : band(u, 0.68, 0.8, aa);
+    float tick = tickLen * (1.0 - smoothstep(tw - fwidth(tickArc), tw + fwidth(tickArc), tickArc));
+    col = mix(col, vec3(0.58, 0.6, 0.64) + sheen * 0.25, tick * mix(0.4, 0.9, major));
+    // Ticks pick up the light of the LED below them.
+    col += led * tick * 0.25;
+
+    // Chamfered lip: a thin bright bevel catching the light, then a dark outer edge.
+    float lip = band(u, 0.9, 0.95, aa);
+    col += lip * (0.06 + 0.4 * sheen);
+    col *= 1.0 - 0.7 * smoothstep(0.955, 1.0, u);
+
+    gl_FragColor = vec4(col, 1.0);
   }
 `;

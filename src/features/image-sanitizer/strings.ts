@@ -165,12 +165,15 @@ export const copy = {
   stage: {
     title: "The metadata washer",
     idle: "Drop a photo on the washer",
+    idleTouch: "Add a photo to the washer",
     drag: "Release to load the washer",
     addMore: "Add more",
     hintIdle: "Nothing is uploaded until you press “Remove metadata”.",
     ready: (n: number, mode: string) => `${n} ${n === 1 ? "image" : "images"} ready · ${mode}`,
     showResults: "Show results",
     loading: "Warming up the washer…",
+    /** Decorative cycle readout under the preloader (four steps, two seconds each). */
+    loadingSteps: ["Filling the drum…", "Adding detergent…", "Loosening EXIF…", "Spinning up…"],
   },
   result: {
     download: "Download cleaned image",
@@ -314,3 +317,131 @@ export const ERROR_TEXT: Partial<Record<ErrorCode | "CLIENT_TOO_LARGE" | "CLIENT
   CLIENT_TOO_MANY: "The batch limit was reached. This file was not added.",
   NETWORK: "Could not reach the server. Check your connection and retry.",
 };
+
+/**
+ * Server-rendered explainer below the washer: the page's crawlable content
+ * (headings, steps, FAQ) and the source for its FAQPage structured data.
+ */
+export const guide = {
+  title: "Remove metadata from photos, privately",
+  lead:
+    "Every photo you take can quietly record where you were, which device you used and when. Before you share an image online, CleanFrame removes that hidden information and proves it is gone, without touching a single pixel.",
+  stepsTitle: "How it works",
+  removedTitle: "What CleanFrame removes",
+  removedNote:
+    "In Privacy mode the ICC colour profile and the orientation flag are kept so the picture looks exactly the same. Strict mode removes those too.",
+  formatsTitle: "Supported formats",
+  privacyTitle: "Privacy by design",
+  faqTitle: "Frequently asked questions",
+  faq: [
+    {
+      q: "What is image metadata?",
+      a: "Metadata is information stored inside an image file alongside the picture: EXIF, IPTC and XMP fields such as GPS coordinates, camera make, model and serial number, the date and time the photo was taken, the author's name, editing software and embedded thumbnails.",
+    },
+    {
+      q: "Does removing metadata reduce image quality?",
+      a: "No. CleanFrame rewrites only the metadata sections of the file. The image data is never decoded or recompressed, and after cleaning the image data hash is checked against the original to prove it is unchanged.",
+    },
+    {
+      q: "How do I remove GPS location from a photo?",
+      a: "Drop the photo on the washer and press “Remove metadata”. GPS coordinates are removed in both Privacy and Strict mode, and the cleaned file is re-read to confirm no location data remains before you download it.",
+    },
+    {
+      q: "Are my images uploaded or stored?",
+      a: "Images are sent over HTTPS only when you press “Remove metadata”, processed in a private temporary folder and deleted as soon as the response is sent. They are never stored in a database, logged or shared, and there are no accounts, analytics or ads.",
+    },
+    {
+      q: "Can I clean several images at once?",
+      a: "Yes. Add a batch of images, clean them in one go and download each file individually or all of them together as a ZIP.",
+    },
+    {
+      q: "Can CleanFrame remove information visible in the picture?",
+      a: "No. CleanFrame removes metadata stored in the file. It cannot detect information inside the pixels themselves, such as visible text, faces, watermarks or steganography.",
+    },
+  ],
+};
+
+/** The before/after showcase under the washer, shown once a run has cleaned files. */
+export const beforeAfter = {
+  eyebrow: "Before & after",
+  title: "Same picture. None of the baggage.",
+  subtitle:
+    "Both sides show your real files: the original on the left, the cleaned download on the right. The pixels stay put; the hidden data doesn't.",
+  jump: "See before & after",
+  before: "Original",
+  after: "Cleaned",
+  slider: "Compare the original and the cleaned file",
+  sliderValue: (pct: number) => `${pct}% of the original shown`,
+  picker: "Choose which image to compare",
+  noPreview: (format: string) => `${format} can't be previewed in this browser. The comparison below is still exact.`,
+  hiddenFields: (n: number) => `${n} hidden ${n === 1 ? "field" : "fields"}`,
+  cleanShort: "Clean",
+  cleanBadge: (kept: number) => (kept > 0 ? `No private metadata · ${kept} kept on purpose` : "No metadata left"),
+  noneFound: "This file had no metadata to begin with. Nothing needed removing.",
+  stats: {
+    fields: "Metadata fields",
+    size: "File size",
+    pixels: "Image data",
+    verification: "Verification",
+  },
+  pixels: {
+    identical: "Identical, hash-checked",
+    "not-verifiable": "Unchanged (dimensions checked)",
+    transformed: "Rotated as you chose",
+    mismatch: "Changed unexpectedly",
+  },
+  verification: {
+    verified: "Verified clean",
+    partial: "Partly verified",
+    failed: "Not verified",
+  },
+  ledgerTitle: "Field by field",
+  fate: {
+    removed: "Removed",
+    kept: "Kept on purpose",
+    remained: "Still present",
+  },
+  reasons: {
+    "color-rendering": "keeps colours accurate",
+    "visible-orientation": "keeps the photo upright",
+  },
+} as const;
+
+/** Optional support modal shown after a download (see src/features/support/support-config.ts). */
+export const support = {
+  eyebrow: "Keep the washer running",
+  title: "Liked how clean that came out?",
+  body: "CleanFrame is free, with no ads, no accounts and no trackers, and it runs on a real server. If it just protected your privacy, a small tip helps keep it that way for everyone.",
+  impact: (fields: number, images: number) =>
+    `You just scrubbed ${fields} hidden ${fields === 1 ? "field" : "fields"} from ${images} ${images === 1 ? "image" : "images"}`,
+  impactLocation: "including your GPS location",
+  amountsLabel: "Pick a tip",
+  amountHint: (amount: number) => `Enter Rs ${amount} in eSewa after scanning.`,
+  qrAlt: (name: string) => (name ? `eSewa QR code for ${name}` : "eSewa QR code"),
+  scanHint: "Scan with the eSewa app",
+  idLabel: "Or pay to eSewa ID",
+  /** Phones show the ID first (you can't scan your own screen), so no "or". */
+  idLabelFirst: "Pay to eSewa ID",
+  copy: "Copy",
+  copied: "Copied",
+  steps: ["Open eSewa", "Scan the QR or use the ID", "Enter your tip"],
+  saveQr: "Save QR image",
+  saveQrHint: "On this phone? Save the QR, then scan it from your gallery in eSewa.",
+  paid: "I've sent it",
+  later: "Maybe later",
+  close: "Close",
+  thanksTitle: "Dhanyabad!",
+  thanksBody: "You're keeping CleanFrame free, private and ad-free for everyone. Thank you for chipping in.",
+  thanksClose: "Back to my photos",
+} as const;
+
+/** Sound toggle in the dock (mutes everything) and the music switch in Settings. */
+export const sound = {
+  label: "Sound",
+  on: "Sound on",
+  off: "Sound off",
+  music: {
+    title: "Background music",
+    description: "A calm, generated soundtrack that follows the wash. Plays only while sound is on.",
+  },
+} as const;

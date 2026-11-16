@@ -1,18 +1,22 @@
 "use client";
 
-import { useFrame, useThree } from "@react-three/fiber";
+import { useFrame, useLoader, useThree } from "@react-three/fiber";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { PALETTE, TIER_BUDGETS, type QualityTier, type TierBudget } from "./chamber-config";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { PALETTE, TIER_BUDGETS, WASHER_MODEL_URL, type QualityTier, type TierBudget } from "./chamber-config";
+import { MAX_GARMENTS, lineSlots, staggered, type Slot } from "./garment-layout";
 import { fitPhoto, loadPhotoTexture, type PhotoTexture } from "./image-texture";
 import type { DecontaminationRun } from "./run";
 import type { TimelineSample } from "./timeline";
 import {
-  beamFragment,
-  beamVertex,
+  DIAL_LEDS,
   clothFragment,
   clothVertex,
+  dialFragment,
+  dialVertex,
   floorFragment,
   floorVertex,
   glassFragment,
@@ -56,40 +60,61 @@ export interface ChamberSubject {
   key: string;
   file: Blob;
   label: string;
+  /** This file's own processing failed: it stays in the drum when the others come out. */
+  failed?: boolean;
 }
 
 export interface ChamberSceneProps {
   mode: StageMode;
   run: DecontaminationRun | null;
-  subject: ChamberSubject | null;
+  /** Every photo in view: the ready batch, or the current run's files (the scene shows up to MAX_GARMENTS). */
+  garments: readonly ChamberSubject[];
   tier: QualityTier;
-  /** Fast device (frame-rate probe passed): add environment reflections. */
+  /** Fast device (frame-rate probe passed): reflections, shadows and the richer room shader. */
   rich?: boolean;
+  /** Draw the two dimmed neighbouring machines (wide stages only; see below). */
+  neighbours?: boolean;
 }
 
 /* ============================================================ layout === */
 
+const MODEL_URL = WASHER_MODEL_URL;
+/** Accepts meshopt-compressed exports (see assets/source/README.md); a plain GLB loads unchanged. */
+const withMeshopt = (loader: GLTFLoader) => void loader.setMeshoptDecoder(MeshoptDecoder);
+useLoader.preload(GLTFLoader, MODEL_URL, withMeshopt);
+
 const BODY_W = 2;
 const BODY_H = 2.4;
-const BODY_D = 1.6;
 const BODY_Y = BODY_H / 2;
-/** Porthole centre in washer-local coordinates (body origin at its centre). */
-const PORT_Y = -0.15;
-const PORT_R = 0.66;
-const FRONT_Z = BODY_D / 2 + 0.04;
 /** Clothesline in front of the washer (world). */
 const LINE_Z = 2.6;
 const LINE_Y = 1.86;
 const LINE_SAG = 0.07;
-const DRUM = new THREE.Vector3(0, BODY_Y + PORT_Y, 0.25);
 const HANG_MAX = { width: 1.15, height: 1.2 };
 const CAMERA_Z = 6.6;
+/** Vertical field of view, shared with the Canvas camera in chamber-canvas.tsx. */
+export const CAMERA_FOV = 35;
 
-/** Cabinet finish: dark brushed gunmetal. */
-const GUNMETAL = "#3a3f48";
+/**
+ * Camera distance for a canvas aspect ratio. Narrow (phone) canvases back off just enough
+ * to keep the washer about 3 units wide in frame. Shared by the camera and the clothesline
+ * layout so the photos are always laid out for what the camera can actually see.
+ */
+function cameraDistance(aspect: number): number {
+  return aspect < 1.2 ? Math.max(CAMERA_Z - 0.6, 4.9 / Math.max(0.5, aspect)) : CAMERA_Z;
+}
+
+/** Width of the line the photos may use: the whole line, or what fits on screen at its depth. */
+function usableLineSpan(aspect: number): number {
+  const full = LINE_HALF * 2 - 0.3;
+  const depth = cameraDistance(aspect) - LINE_Z;
+  const visible = 2 * depth * Math.tan(THREE.MathUtils.degToRad(CAMERA_FOV / 2)) * aspect;
+  // A little margin so pegs and edges don't touch the screen edge.
+  return Math.min(full, visible * 0.9);
+}
+
 const EMBER = new THREE.Color(PALETTE.accent);
 const CLEAN = new THREE.Color(PALETTE.mint);
-const LED_IDLE = CLEAN.clone().multiplyScalar(0.35);
 const FAULT = new THREE.Color(PALETTE.fault);
 const WATER_LIGHT = new THREE.Color("#8fdcff");
 const MURK_LIGHT = new THREE.Color("#c9c46a");
@@ -131,14 +156,12 @@ interface Pose {
   progress: number;
   /** LED ring runs a chase while waiting on the server. */
   chase: boolean;
-  /** Program dial: 0 = off, 1 = turned to the wash program. */
-  dial: number;
-  /** Detergent drawer: 0 shut .. 1 pulled out. */
-  drawer: number;
   /** Foam on the water surface, 0..1. */
   suds: number;
   /** Celebration hop when the wash finishes, 0..1..0. */
   hop: number;
+  /** The wash is handing photos back (failed ones stay in the drum). */
+  returning: boolean;
 }
 
 const EMPTY = -0.85;
@@ -163,10 +186,9 @@ function derivePose(mode: StageMode, sample: TimelineSample | null, hasPhoto: bo
     tug: 0,
     progress: 0,
     chase: false,
-    dial: 0,
-    drawer: 0,
     suds: 0,
     hop: 0,
+    returning: false,
   };
 
   if (!sample || (mode !== "run" && mode !== "finished")) {
@@ -186,9 +208,6 @@ function derivePose(mode: StageMode, sample: TimelineSample | null, hasPhoto: bo
   // Loading: door opens, photo is pulled in, door shuts, water fills.
   pose.face = "talk";
   pose.tug = sample.materialize * (1 - sample.activate);
-  pose.dial = sample.materialize > 0 ? 1 : 0;
-  // Detergent drawer slides out as the cycle is set, and shuts as the photo goes in.
-  pose.drawer = easeInOut(sample.materialize) * (1 - easeInOut(seg(sample.activate, 0.1, 0.6)));
   pose.progress = 0.12 * sample.activate + 0.28 * sample.scan + 0.35 * sample.purge + 0.25 * sample.clear;
   pose.suds = seg(sample.scan, 0.25, 0.8);
   pose.door = easeInOut(seg(sample.activate, 0, 0.5)) * (1 - easeInOut(seg(sample.scan, 0, 0.35)));
@@ -232,6 +251,7 @@ function derivePose(mode: StageMode, sample: TimelineSample | null, hasPhoto: bo
   if (done) {
     const c = phase === "complete" ? 1 : sample.clear;
     pose.face = "happy";
+    pose.returning = true;
     pose.spin = 0;
     pose.murk = 0;
     pose.emerge = 0;
@@ -264,10 +284,15 @@ function derivePose(mode: StageMode, sample: TimelineSample | null, hasPhoto: bo
 
 /* ============================================================ shared === */
 
-/** Normalised pointer for parallax; the canvas itself takes no pointer events. */
+/**
+ * Normalised pointer for parallax; the canvas itself takes no pointer events.
+ * Mouse/pen only: on touch screens pointermove fires while scrolling and tapping,
+ * which would jerk the camera around, so phones keep a steady view.
+ */
 const pointer = new THREE.Vector2();
 function usePointer() {
   useEffect(() => {
+    if (!window.matchMedia?.("(pointer: fine)").matches) return;
     const onMove = (e: PointerEvent) => pointer.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
     window.addEventListener("pointermove", onMove, { passive: true });
     return () => window.removeEventListener("pointermove", onMove);
@@ -294,11 +319,11 @@ function seeds(count: number, seed: number) {
 
 /* ============================================================= scene === */
 
-export function WasherScene({ mode, run, subject, tier, rich = false }: ChamberSceneProps) {
+export function WasherScene({ mode, run, garments, tier, rich = false, neighbours = false }: ChamberSceneProps) {
   const budget = TIER_BUDGETS[tier];
   // Shadow maps redraw every caster each frame: only on wide stages of fast devices.
   const shadows = tier === "full" && rich;
-  const photo = usePhoto(subject);
+  const hasPhotos = garments.length > 0;
   usePointer();
 
   // One pose per frame, shared by every part through a ref.
@@ -307,7 +332,7 @@ export function WasherScene({ mode, run, subject, tier, rich = false }: ChamberS
   useFrame((_, dt) => {
     elapsed.current += Math.min(dt, 0.1);
     const sample = run ? run.sample() : null;
-    pose.current = derivePose(mode, sample, !!photo, elapsed.current);
+    pose.current = derivePose(mode, sample, hasPhotos, elapsed.current);
   }, -1);
 
   return (
@@ -315,14 +340,16 @@ export function WasherScene({ mode, run, subject, tier, rich = false }: ChamberS
       <color attach="background" args={["#08090c"]} />
       <fog attach="fog" args={["#08090c", 8, 16]} />
       <CameraRig motion={budget.cameraMotion} />
-      <Room budget={budget} pose={pose} />
+      <Room budget={budget} pose={pose} rich={rich} />
       {rich && <Reflections />}
       <Lights shadows={shadows} pose={pose} />
       <Washer pose={pose} budget={budget} shadows={shadows} />
-      <WasherShell x={-2.35} />
-      <WasherShell x={2.35} />
+      {/* Neighbouring machines triple the model's vertex load: wide stages only (on a phone
+          they'd sit mostly out of frame anyway), and dropped if the device proves slow. */}
+      {neighbours && tier === "full" && <WasherShell x={-2.35} />}
+      {neighbours && tier === "full" && <WasherShell x={2.35} />}
       <Clothesline />
-      <Laundry photo={photo} pose={pose} budget={budget} />
+      <Laundry garments={garments} pose={pose} budget={budget} />
       <AdaptiveQuality />
     </>
   );
@@ -349,23 +376,27 @@ function AdaptiveQuality() {
   return null;
 }
 
+/** Decodes a photo once per queue item (a changed `failed` flag doesn't re-decode it). */
 function usePhoto(subject: ChamberSubject | null): PhotoTexture | null {
   const [loaded, setLoaded] = useState<{ key: string; photo: PhotoTexture } | null>(null);
+  const key = subject?.key;
+  const file = subject?.file;
+  const label = subject?.label;
   useEffect(() => {
-    if (!subject) return;
+    if (!key || !file || !label) return;
     let alive = true;
     let owned: PhotoTexture | null = null;
-    void loadPhotoTexture(subject.file, subject.label).then((p) => {
+    void loadPhotoTexture(file, label).then((p) => {
       if (!alive) return p.dispose();
       owned = p;
-      setLoaded({ key: subject.key, photo: p });
+      setLoaded({ key, photo: p });
     });
     return () => {
       alive = false;
       owned?.dispose();
     };
-  }, [subject]);
-  return loaded && subject && loaded.key === subject.key ? loaded.photo : null;
+  }, [key, file, label]);
+  return loaded && key && loaded.key === key ? loaded.photo : null;
 }
 
 /** A soft studio room baked into an environment map: chrome, glass and enamel get real reflections. */
@@ -377,7 +408,7 @@ function Reflections() {
     const room = new RoomEnvironment();
     const target = pmrem.fromScene(room, 0.04);
     scene.environment = target.texture;
-    scene.environmentIntensity = 0; // faded in below: reflections arrive after the perf probe, so no pop
+    scene.environmentIntensity = 0; // eased in below, under the preloader's fade, so they never snap on
     room.dispose();
     pmrem.dispose();
     return () => {
@@ -400,9 +431,7 @@ function CameraRig({ motion }: { motion: boolean }) {
   const size = useThree((s) => s.size);
   const smooth = useRef(new THREE.Vector2());
   useFrame((_, dt) => {
-    const aspect = size.width / Math.max(1, size.height);
-    // Narrow (phone) canvases: back off just enough to keep the washer about 3 units wide in frame.
-    const distance = aspect < 1.2 ? Math.max(CAMERA_Z - 0.6, 4.9 / Math.max(0.5, aspect)) : CAMERA_Z;
+    const distance = cameraDistance(size.width / Math.max(1, size.height));
     if (motion) smooth.current.lerp(pointer, 1 - Math.exp(-dt * 2));
     camera.position.set(smooth.current.x * 0.4, 1.6 + smooth.current.y * 0.15, distance);
     camera.lookAt(0, 1.25, 0);
@@ -414,28 +443,45 @@ function CameraRig({ motion }: { motion: boolean }) {
 
 type PoseRef = React.RefObject<Pose>;
 
-function Room({ budget, pose }: { budget: TierBudget; pose: PoseRef }) {
+function Room({ budget, pose, rich }: { budget: TierBudget; pose: PoseRef; rich: boolean }) {
   const floorUniforms = useMemo(
     () => ({
       uTime: { value: 0 },
-      uLight: { value: new THREE.Color("#ff9a4d") },
+      uLight: { value: new THREE.Color("#a493ff") },
       uGlow: { value: WATER_LIGHT.clone() },
       uGlowStrength: { value: 0 },
+      uAccent: { value: EMBER.clone() },
+      uEnergy: { value: 0 },
     }),
     [],
   );
-  const wallUniforms = useMemo(() => ({ uTime: { value: 0 }, uWindow: { value: new THREE.Color("#ff8a3d") } }), []);
+  const wallUniforms = useMemo(() => ({ uTime: { value: 0 }, uAccent: { value: EMBER.clone() }, uEnergy: { value: 0 } }), []);
   const floor = useRef<THREE.ShaderMaterial>(null);
   const wall = useRef<THREE.ShaderMaterial>(null);
+  // The room reacts to the wash: energy follows the drum and water, colour the outcome.
+  const room = useRef({ energy: 0, accent: EMBER.clone() });
 
-  useFrame((_, dt) => {
+  useFrame((_, rawDt) => {
+    const dt = Math.min(rawDt, 0.1);
+    const p = pose.current;
+    const r = room.current;
+    const target = Math.min(1, (Math.abs(p.spin) / 9) * 0.8 + p.water * 0.2 + p.sparkle * 0.6 + p.fault * 0.5);
+    r.energy = damp(r.energy, target, 1.5, dt);
+    r.accent.lerp(p.fault > 0.05 ? FAULT : p.progress > 0.99 ? CLEAN : EMBER, 1 - Math.exp(-dt * 3));
     const f = floor.current;
     if (f) {
-      f.uniforms.uTime.value = pose.current.time;
-      f.uniforms.uGlowStrength.value = damp(f.uniforms.uGlowStrength.value, pose.current.water, 2, dt);
-      (f.uniforms.uGlow.value as THREE.Color).copy(pose.current.fault > 0 ? FAULT : WATER_LIGHT);
+      f.uniforms.uTime.value = p.time;
+      f.uniforms.uGlowStrength.value = damp(f.uniforms.uGlowStrength.value, p.water, 2, dt);
+      (f.uniforms.uGlow.value as THREE.Color).copy(p.fault > 0 ? FAULT : WATER_LIGHT);
+      (f.uniforms.uAccent.value as THREE.Color).copy(r.accent);
+      f.uniforms.uEnergy.value = r.energy;
     }
-    if (wall.current) wall.current.uniforms.uTime.value = pose.current.time;
+    const w = wall.current;
+    if (w) {
+      w.uniforms.uTime.value = p.time;
+      (w.uniforms.uAccent.value as THREE.Color).copy(r.accent);
+      w.uniforms.uEnergy.value = r.energy;
+    }
   });
 
   return (
@@ -446,58 +492,18 @@ function Room({ budget, pose }: { budget: TierBudget; pose: PoseRef }) {
       </mesh>
       <mesh position={[0, 4, -1.35]}>
         <planeGeometry args={[24, 8]} />
-        <shaderMaterial ref={wall} uniforms={wallUniforms} vertexShader={wallVertex} fragmentShader={wallFragment} />
+        {/* Keyed so the shader recompiles when the device tier settles (LITE on slow devices). */}
+        <shaderMaterial
+          key={rich ? "rich" : "lite"}
+          ref={wall}
+          uniforms={wallUniforms}
+          vertexShader={wallVertex}
+          fragmentShader={wallFragment}
+          defines={rich ? {} : { LITE: 1 }}
+        />
       </mesh>
-      <LightBeams />
       {budget.particles > 40 && <Motes count={Math.round(budget.particles * 0.6)} />}
     </group>
-  );
-}
-
-/** Two soft shafts of window light slanting down to the floor in front of the washer. */
-function LightBeams() {
-  const uniforms = useMemo(
-    () => ({ uTime: { value: 0 }, uColor: { value: new THREE.Color("#ff9a50") }, uIntensity: { value: 0.18 } }),
-    [],
-  );
-  const material = useRef<THREE.ShaderMaterial>(null);
-  const beams = useMemo(() => {
-    const toward = new THREE.Vector3(0, 0, 1);
-    return [
-      { from: new THREE.Vector3(3.0, 3.6, -1.3), to: new THREE.Vector3(0.9, 0, 2.6), width: 1.5 },
-      { from: new THREE.Vector3(3.8, 3.4, -1.3), to: new THREE.Vector3(2.1, 0, 2.4), width: 1.1 },
-    ].map(({ from, to, width }) => {
-      const up = from.clone().sub(to);
-      const length = up.length();
-      up.normalize();
-      const normal = toward.clone().sub(up.clone().multiplyScalar(toward.dot(up))).normalize();
-      const side = new THREE.Vector3().crossVectors(up, normal);
-      const matrix = new THREE.Matrix4().makeBasis(side, up, normal);
-      const quaternion = new THREE.Quaternion().setFromRotationMatrix(matrix);
-      return { position: from.clone().add(to).multiplyScalar(0.5), quaternion, length, width };
-    });
-  }, []);
-  useFrame((_, dt) => {
-    if (material.current) material.current.uniforms.uTime.value += Math.min(dt, 0.1);
-  });
-  return (
-    <>
-      {beams.map((b, i) => (
-        <mesh key={i} position={b.position} quaternion={b.quaternion} renderOrder={5}>
-          <planeGeometry args={[b.width, b.length]} />
-          <shaderMaterial
-            ref={i === 0 ? material : undefined}
-            uniforms={uniforms}
-            vertexShader={beamVertex}
-            fragmentShader={beamFragment}
-            transparent
-            depthWrite={false}
-            blending={THREE.AdditiveBlending}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
-      ))}
-    </>
   );
 }
 
@@ -517,7 +523,7 @@ function Motes({ count }: { count: number }) {
       return g;
     }, [count]),
   );
-  const uniforms = useMemo(() => ({ uTime: { value: 0 }, uSize: { value: 60 }, uColor: { value: new THREE.Color("#ffb27a") } }), []);
+  const uniforms = useMemo(() => ({ uTime: { value: 0 }, uSize: { value: 60 }, uColor: { value: new THREE.Color("#c4b8ff") } }), []);
   const material = useRef<THREE.ShaderMaterial>(null);
   const dpr = useThree((s) => s.viewport.dpr);
   useFrame((_, dt) => {
@@ -555,83 +561,24 @@ function Lights({ shadows, pose }: { shadows: boolean; pose: PoseRef }) {
   return (
     <>
       <ambientLight color="#e8ecff" intensity={0.35} />
-      <hemisphereLight args={["#ffe3cc", "#0b0c10", 0.55]} />
+      <hemisphereLight args={["#ebe6ff", "#0b0c10", 0.55]} />
       <spotLight
         ref={key}
         position={[3.5, 6, 4.5]}
         angle={0.55}
         penumbra={0.8}
         intensity={115}
-        color="#ffc29a"
+        color="#ddd4ff"
         castShadow={shadows}
         shadow-mapSize={[1024, 1024]}
         shadow-bias={-0.0004}
       />
       {/* Cool rim light: keeps the dark metal's silhouette readable against the room. */}
       <directionalLight position={[-4, 3, -2]} intensity={1.3} color="#5ca8ff" />
-      <directionalLight position={[-1, 2.5, 6]} intensity={0.7} color="#fff6ee" />
+      <directionalLight position={[-1, 2.5, 6]} intensity={0.7} color="#f6f4ff" />
       <pointLight ref={alarm} position={[0, 2.6, 1.4]} color={PALETTE.fault} distance={5} intensity={0} />
     </>
   );
-}
-
-/* ========================================================== geometry === */
-
-function roundedRect(w: number, h: number, r: number) {
-  const s = new THREE.Shape();
-  const x = -w / 2;
-  const y = -h / 2;
-  s.moveTo(x + r, y);
-  s.lineTo(x + w - r, y);
-  s.quadraticCurveTo(x + w, y, x + w, y + r);
-  s.lineTo(x + w, y + h - r);
-  s.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  s.lineTo(x + r, y + h);
-  s.quadraticCurveTo(x, y + h, x, y + h - r);
-  s.lineTo(x, y + r);
-  s.quadraticCurveTo(x, y, x + r, y);
-  return s;
-}
-
-let bodyGeometry: THREE.ExtrudeGeometry | null = null;
-/** Cabinet with a round tunnel for the porthole; shared by every washer and never disposed. */
-function getBodyGeometry() {
-  if (!bodyGeometry) {
-    const shape = roundedRect(BODY_W, BODY_H, 0.14);
-    const hole = new THREE.Path();
-    hole.absarc(0, PORT_Y, PORT_R, 0, Math.PI * 2, true);
-    shape.holes.push(hole);
-    bodyGeometry = new THREE.ExtrudeGeometry(shape, {
-      depth: BODY_D,
-      bevelEnabled: true,
-      bevelThickness: 0.04,
-      bevelSize: 0.04,
-      bevelSegments: 4,
-      curveSegments: 48,
-    });
-    bodyGeometry.translate(0, 0, -BODY_D / 2);
-  }
-  return bodyGeometry;
-}
-
-function perforatedTexture() {
-  const c = document.createElement("canvas");
-  c.width = c.height = 64;
-  const g = c.getContext("2d")!;
-  g.fillStyle = "#b9bec4";
-  g.fillRect(0, 0, 64, 64);
-  g.fillStyle = "#3d4248";
-  for (let y = 0; y < 4; y++)
-    for (let x = 0; x < 4; x++) {
-      g.beginPath();
-      g.arc(x * 16 + 8 + (y % 2) * 8, y * 16 + 8, 3, 0, Math.PI * 2);
-      g.fill();
-    }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(16, 5);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
 }
 
 /* ============================================================ washer === */
@@ -653,31 +600,204 @@ function stepSpring(s: Spring, target: number, stiffness: number, damping: numbe
   }
 }
 
-const CHROME = { color: "#c9ced6", metalness: 1, roughness: 0.18 } as const;
-const RUBBER = { color: "#1b1f22", roughness: 0.85, metalness: 0 } as const;
-const PANEL_Y = 0.88;
-const DIAL_X = 0.56;
-const LED_COUNT = 18;
-const LED_RING = 0.2;
-const LED_OFF = new THREE.Color("#2a2320");
+const LED_COUNT = DIAL_LEDS;
+const LED_OFF = new THREE.Color("#211e2b");
 const LED_DIM = CLEAN.clone().multiplyScalar(0.25);
-const DOME_R = 1.6;
-const DOME_THETA = Math.asin(0.6 / DOME_R);
+/** Depth of the inside-the-drum effects layer (water, foam, grime) in porthole units. */
+const EFFECTS_DEPTH = 0.66;
+
+/**
+ * The user's washing-machine model, measured and rigged once after loading:
+ * scaled to BODY_H and stood on the floor, with the door re-parented onto a
+ * hinge pivot (left edge) and the drum onto a spin pivot (porthole axis).
+ * Everything is expressed in the washer body's local space (origin at the
+ * cabinet's centre).
+ */
+interface WasherRig {
+  model: THREE.Object3D;
+  doorPivot: THREE.Group;
+  drumPivot: THREE.Group;
+  /** Porthole centre; z is the front of the door glass. */
+  port: THREE.Vector3;
+  glassRadius: number;
+  doorRadius: number;
+  /** Front face of the cabinet. */
+  front: number;
+  /** Door glass centre relative to the hinge (for decorations that swing with the door). */
+  glassInDoor: THREE.Vector3;
+  /** Front of the drum: inside-the-drum effects stay behind it. */
+  drumFront: number;
+  panel: THREE.Box3;
+  /** The program knob on the panel (centre at its front face, radius, panel depth at its foot), for the dial. */
+  knob: { centre: THREE.Vector3; radius: number; base: number } | null;
+}
+
+const PART = { door: "xyj_gaizi", glass: "xyj_boli", drum: "xyj_neidan", shell: "xyj_waike", panel: "xyj_jiemian" } as const;
+
+function partOf(root: THREE.Object3D, name: string): THREE.Object3D {
+  const part = root.getObjectByName(name);
+  if (!part) throw new Error(`washer model is missing "${name}"`);
+  return part;
+}
+
+/** One-time material fixes, shared by every clone. */
+function prepareMaterials(root: THREE.Object3D) {
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const m of materials as THREE.MeshStandardMaterial[]) {
+      if (m.userData.cfPrepared) continue;
+      m.userData.cfPrepared = true;
+      // The model ships DirectX-convention normal maps; glTF/three expect OpenGL (green up).
+      if (m.normalMap) m.normalScale.y *= -1;
+      if (m.name === "glass") {
+        // The authored glass is nearly opaque; thin it so the wash inside stays visible.
+        m.transparent = true;
+        m.opacity = 0.3;
+        m.depthWrite = false;
+      }
+    }
+  });
+}
+
+/**
+ * The knob is part of the cabinet mesh, not its own node: find it as the cluster of
+ * cabinet vertices standing proud of everything else in the control-panel band.
+ * Returns null when nothing protrudes (the LED ring then falls back to the panel).
+ */
+function findKnob(shell: THREE.Object3D, panel: THREE.Box3): WasherRig["knob"] {
+  const mesh = shell as THREE.Mesh;
+  const position = mesh.geometry?.attributes?.position;
+  if (!position) return null;
+  const height = panel.max.y - panel.min.y;
+  const bandMin = panel.min.y - height;
+  const bandMax = panel.max.y + height;
+  const v = new THREE.Vector3();
+  const band: THREE.Vector3[] = [];
+  let front = -Infinity;
+  for (let i = 0; i < position.count; i++) {
+    v.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
+    if (v.y < bandMin || v.y > bandMax || v.x < panel.min.x || v.x > panel.max.x + height) continue;
+    band.push(v.clone());
+    if (v.z > front) front = v.z;
+  }
+  // Anything within ~1 % of the cabinet height of the front-most point belongs to the knob.
+  const proud = band.filter((p) => p.z > front - BODY_H * 0.014);
+  if (proud.length < 8) return null;
+  const box = new THREE.Box3().setFromPoints(proud);
+  const centre = box.getCenter(new THREE.Vector3());
+  centre.z = front;
+  const radius = Math.max(box.max.x - box.min.x, box.max.y - box.min.y) / 2;
+  // The panel face the knob stands on: the front-most cabinet point just around its foot
+  // (or, failing that, anywhere in the band that isn't the knob itself).
+  let near = -Infinity;
+  let rest = -Infinity;
+  for (const p of band) {
+    if (p.z > front - BODY_H * 0.014) continue;
+    rest = Math.max(rest, p.z);
+    const d = Math.hypot(p.x - centre.x, p.y - centre.y);
+    if (d > radius * 1.2 && d < radius * 2.6) near = Math.max(near, p.z);
+  }
+  const base = Number.isFinite(near) ? near : Number.isFinite(rest) ? rest : front - radius * 0.4;
+  return { centre, radius, base };
+}
+
+function buildRig(source: THREE.Object3D): WasherRig {
+  const model = source.clone(true);
+  prepareMaterials(model);
+  const holder = new THREE.Group();
+  holder.add(model);
+  holder.updateMatrixWorld(true);
+
+  // Scale to the cabinet height and stand it on the floor, centred.
+  const shellBox = new THREE.Box3().setFromObject(partOf(model, PART.shell));
+  const size = shellBox.getSize(new THREE.Vector3());
+  const k = BODY_H / size.y;
+  const centre = shellBox.getCenter(new THREE.Vector3());
+  model.scale.multiplyScalar(k);
+  model.position.set(-centre.x * k, -shellBox.min.y * k - BODY_H / 2, -centre.z * k);
+  holder.updateMatrixWorld(true);
+
+  const shell = new THREE.Box3().setFromObject(partOf(model, PART.shell));
+  const door = partOf(model, PART.door);
+  const doorBox = new THREE.Box3().setFromObject(door);
+  const doorCentre = doorBox.getCenter(new THREE.Vector3());
+  const glassPart = partOf(model, PART.glass);
+  // Draw the glass after everything inside the drum (render orders 2-5), like a real window.
+  glassPart.renderOrder = 7;
+  const glassBox = new THREE.Box3().setFromObject(glassPart);
+  const glassCentre = glassBox.getCenter(new THREE.Vector3());
+  const drumBox = new THREE.Box3().setFromObject(partOf(model, PART.drum));
+  const panel = new THREE.Box3().setFromObject(partOf(model, PART.panel));
+
+  // Door on a vertical hinge at its left edge, mid-thickness.
+  const hinge = new THREE.Vector3(doorBox.min.x + 0.02, doorCentre.y, doorCentre.z);
+  const doorPivot = new THREE.Group();
+  doorPivot.name = "door-hinge";
+  doorPivot.position.copy(hinge);
+  holder.add(doorPivot);
+  holder.updateMatrixWorld(true);
+  doorPivot.attach(door);
+
+  // Drum spins about the porthole axis.
+  const drumPivot = new THREE.Group();
+  drumPivot.name = "drum-axis";
+  drumPivot.position.set(glassCentre.x, glassCentre.y, drumBox.getCenter(new THREE.Vector3()).z);
+  holder.add(drumPivot);
+  holder.updateMatrixWorld(true);
+  drumPivot.attach(partOf(model, PART.drum));
+
+  // Pivots become siblings of the model so React can own them directly.
+  holder.remove(doorPivot, drumPivot);
+
+  return {
+    model,
+    doorPivot,
+    drumPivot,
+    port: new THREE.Vector3(glassCentre.x, glassCentre.y, glassBox.max.z),
+    glassRadius: Math.max(glassBox.max.x - glassBox.min.x, glassBox.max.y - glassBox.min.y) / 2,
+    doorRadius: Math.max(doorBox.max.x - doorBox.min.x, doorBox.max.y - doorBox.min.y) / 2,
+    front: shell.max.z,
+    glassInDoor: new THREE.Vector3(glassCentre.x - hinge.x, glassCentre.y - hinge.y, glassBox.max.z - hinge.z),
+    drumFront: Math.min(drumBox.max.z, glassBox.min.z) - 0.01,
+    panel,
+    knob: findKnob(partOf(model, PART.shell), panel),
+  };
+}
+
+/** Where the photo tumbles inside the drum (world space); set once the model is measured. */
+const drumAnchor = new THREE.Vector3(0, BODY_Y, 0.25);
+
+function useWasherModel() {
+  const gltf = useLoader(GLTFLoader, MODEL_URL, withMeshopt);
+  return gltf.scene;
+}
 
 function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; shadows: boolean }) {
+  const source = useWasherModel();
+  const rig = useMemo(() => buildRig(source), [source]);
+  // Inside-the-drum effects are authored for a 0.6-radius porthole; fit them to this glass.
+  const fx = useMemo(() => {
+    const scale = rig.glassRadius / 0.6;
+    return { scale, z: rig.drumFront - EFFECTS_DEPTH * scale };
+  }, [rig]);
+  useEffect(() => {
+    // Just behind the water surface: this model's inner drum wall sits close behind the opening.
+    drumAnchor.set(rig.port.x, BODY_Y + rig.port.y, fx.z + 0.5 * fx.scale);
+  }, [rig, fx]);
+
   const body = useRef<THREE.Group>(null);
+  const model = useRef<THREE.Object3D>(null);
   const door = useRef<THREE.Group>(null);
   const drum = useRef<THREE.Group>(null);
-  const dial = useRef<THREE.Group>(null);
-  const drawer = useRef<THREE.Group>(null);
   const interior = useRef<THREE.PointLight>(null);
   const bubbles = useRef<THREE.InstancedMesh>(null);
   const suds = useRef<THREE.InstancedMesh>(null);
   const water = useRef<THREE.ShaderMaterial>(null);
   const glass = useRef<THREE.ShaderMaterial>(null);
   const grime = useRef<THREE.ShaderMaterial>(null);
-  const led = useRef<THREE.MeshBasicMaterial>(null);
-  // Glowing ember accents (porthole halo, edge strips, lid seam, panel trim) share one colour per frame.
+  // Glowing ember accents (porthole halo, edge strips) share one colour per frame.
   const accents = useRef(new Set<THREE.MeshBasicMaterial>());
   const addAccent = useCallback((material: THREE.MeshBasicMaterial | null) => {
     if (!material) return;
@@ -688,10 +808,32 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
     };
   }, []);
   const accentColor = useRef(new THREE.Color());
-  const ring = useRef<THREE.InstancedMesh | null>(null);
+  // Dial LED colours: one array shared with the dial shader's uniform, rewritten each frame.
+  const leds = useMemo(() => Array.from({ length: LED_COUNT }, () => LED_OFF.clone()), []);
+  const knobPointer = useRef<THREE.Group>(null);
+  const pointerMaterials = useRef(new Set<THREE.MeshBasicMaterial>());
+  const addPointerMaterial = useCallback((material: THREE.MeshBasicMaterial | null) => {
+    if (!material) return;
+    const set = pointerMaterials.current;
+    set.add(material);
+    return () => {
+      set.delete(material);
+    };
+  }, []);
   const ledColor = useRef(new THREE.Color());
 
-  const drumMap = useDispose(useMemo(() => perforatedTexture(), []));
+  // Shadows follow the quality tier.
+  useEffect(() => {
+    for (const root of [model.current, door.current, drum.current]) {
+      root?.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) {
+          o.castShadow = shadows;
+          o.receiveShadow = shadows;
+        }
+      });
+    }
+  }, [shadows, rig]);
+
   const waterUniforms = useMemo(
     () => ({
       uLevel: { value: EMPTY },
@@ -771,16 +913,15 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
     shudder: 0,
     jolt: 0,
     progress: 0,
+    knob: 0,
     door: { x: 0, v: 0 } as Spring,
-    dial: { x: 0, v: 0 } as Spring,
-    drawer: { x: 0, v: 0 } as Spring,
     hop: { x: 0, v: 0 } as Spring,
     sway: { x: 0, v: 0 } as Spring,
   });
   const tmp = useRef(new THREE.Object3D());
   const lightColor = useRef(new THREE.Color());
 
-  useFrame((_, rawDt) => {
+  useFrame(({ invalidate }, rawDt) => {
     const dt = Math.min(rawDt, 0.1);
     const p = pose.current;
     const now = p.time;
@@ -813,12 +954,6 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
     if (door.current) door.current.rotation.y = -1.85 * d.x;
     if (drum.current) drum.current.rotation.z = -m.angle;
 
-    // Program dial clicks round to the wash setting with a little overshoot.
-    stepSpring(m.dial, p.dial, 90, 10, dt);
-    if (dial.current) dial.current.rotation.z = -m.dial.x * Math.PI * 0.72;
-    stepSpring(m.drawer, p.drawer, 55, 11, dt);
-    if (drawer.current) drawer.current.position.z = FRONT_Z + 0.02 + m.drawer.x * 0.34;
-
     // Suspension: the drum's off-centre load drags the cabinet round with it; spin-up leans it back.
     const speed = Math.min(1, Math.abs(m.spin) / 9);
     const load = speed * speed * m.water;
@@ -837,13 +972,16 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
       const stretch = m.hop.v * 0.012;
       body.current.scale.set(1 - stretch * 0.5, 1 + stretch, 1 - stretch * 0.5);
     }
+    // On demand-rendered (idle/slow) frames, keep drawing until the springs have settled,
+    // so a slow device never freezes the door half-open.
+    const moving = (s: Spring, target: number) => Math.abs(s.v) > 1e-3 || Math.abs(s.x - target) > 1e-3;
+    if (moving(d, p.door) || moving(m.hop, p.hop) || m.jolt > 0.01) invalidate();
 
     const light = lightColor.current.copy(WATER_LIGHT).lerp(MURK_LIGHT, m.murk * 0.7).lerp(FAULT, m.fault);
     if (interior.current) {
       interior.current.color.copy(light);
       interior.current.intensity = 0.3 + m.water * 2.2 + m.fault * 2;
     }
-    if (led.current) led.current.color.copy(m.fault > 0.05 ? FAULT : Math.abs(m.spin) > 0.5 ? EMBER : LED_IDLE);
 
     // Accents breathe when idle, burn brighter with drum speed, flash on a door slam,
     // turn cyan once the wash is done and red on a jam.
@@ -852,28 +990,28 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
     accentColor.current.copy(tone).multiplyScalar(level);
     accents.current.forEach((mat) => mat.color.copy(accentColor.current));
 
-    // LED ring: fills with progress, chases while waiting, blinks red on a jam, breathes when idle.
-    const blink = Math.sin(now * 8) > 0;
-    const dots = ring.current;
-    if (dots) {
-      const c = ledColor.current;
-      for (let i = 0; i < LED_COUNT; i++) {
-        const f = i / LED_COUNT;
-        if (m.fault > 0.05) {
-          c.copy(blink ? FAULT : LED_OFF);
-        } else if (p.chase) {
-          const head = (now * 0.9) % 1;
-          const tail = (head - f + 1) % 1;
-          c.copy(LED_OFF).lerp(EMBER, Math.max(f < m.progress ? 0.5 : 0, 1 - tail * 5));
-        } else if (m.progress > 0.002) {
-          c.copy(LED_OFF).lerp(m.progress > 0.99 ? CLEAN : EMBER, clamp01((m.progress - f) * LED_COUNT));
-        } else {
-          c.copy(LED_OFF).lerp(LED_DIM, (0.5 + 0.5 * Math.sin(now * 1.6 - f * Math.PI * 2)) * 0.6);
-        }
-        dots.setColorAt(i, c);
+    // Dial LEDs: fill with progress, chase while waiting, blink red on a jam, breathe when idle.
+    const c = ledColor.current;
+    const head = (now * 0.9) % 1;
+    for (let i = 0; i < LED_COUNT; i++) {
+      const f = i / LED_COUNT;
+      if (m.fault > 0.05) {
+        c.copy(blinkOn(now) ? FAULT : LED_OFF);
+      } else if (p.chase) {
+        const tail = (head - f + 1) % 1;
+        c.copy(LED_OFF).lerp(EMBER, Math.max(f < m.progress ? 0.45 : 0, 1 - tail * 5));
+      } else if (m.progress > 0.002) {
+        c.copy(LED_OFF).lerp(m.progress > 0.99 ? CLEAN : EMBER, clamp01((m.progress - f) * LED_COUNT));
+      } else {
+        c.copy(LED_OFF).lerp(LED_DIM, (0.5 + 0.5 * Math.sin(now * 1.6 - f * Math.PI * 2)) * 0.6);
       }
-      if (dots.instanceColor) dots.instanceColor.needsUpdate = true;
+      leds[i]!.copy(c);
     }
+    // The knob's pointer turns to the cycle's leading LED (the chase head while waiting), home at twelve.
+    const knobTarget = m.fault > 0.05 ? m.knob : p.chase ? head : m.progress > 0.99 ? 0 : m.progress;
+    m.knob = damp(m.knob, knobTarget, p.chase ? 10 : 3, dt);
+    if (knobPointer.current) knobPointer.current.rotation.z = -m.knob * Math.PI * 2;
+    pointerMaterials.current.forEach((mat) => mat.color.copy(tone).multiplyScalar(0.6 + 0.4 * level));
 
     const w = water.current;
     if (w) {
@@ -896,7 +1034,7 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
       gr.uniforms.uEmerge.value = m.emerge * m.water;
       gr.uniforms.uFlush.value = m.flush;
       gr.uniforms.uSpin.value = -m.angle;
-      gr.uniforms.uSize.value = 38 * dpr;
+      gr.uniforms.uSize.value = 38 * dpr * fx.scale;
     }
 
     const o = tmp.current;
@@ -937,115 +1075,44 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
     }
   });
 
+  const halfWidth = BODY_W / 2;
+  const glassScale = rig.glassRadius / 0.6;
   return (
     <group ref={body} position={[0, BODY_Y, 0]}>
-      {/* Enamelled cabinet. */}
-      <mesh geometry={getBodyGeometry()} castShadow={shadows} receiveShadow={shadows}>
-        <meshStandardMaterial color={GUNMETAL} roughness={0.32} metalness={0.45} />
-      </mesh>
-      {/* Worktop lid with a shadow gap under it. */}
-      <mesh position={[0, BODY_H / 2 + 0.05, 0]} castShadow={shadows}>
-        <boxGeometry args={[BODY_W + 0.06, 0.05, BODY_D + 0.06]} />
-        <meshStandardMaterial color="#23262c" roughness={0.35} metalness={0.5} />
-      </mesh>
-      <mesh position={[0, BODY_H / 2 + 0.022, FRONT_Z - 0.02]}>
-        <boxGeometry args={[BODY_W - 0.1, 0.012, 0.02]} />
+      <primitive ref={model} object={rig.model} />
+      <primitive ref={drum} object={rig.drumPivot} />
+
+      {/* Door: the model's door and glass on a sprung hinge, plus a steam/fault overlay on the glass. */}
+      <primitive ref={door} object={rig.doorPivot}>
+        <mesh position={[rig.glassInDoor.x, rig.glassInDoor.y, rig.glassInDoor.z + 0.004]} scale={glassScale} renderOrder={8}>
+          <circleGeometry args={[0.6, 64]} />
+          <shaderMaterial ref={glass} uniforms={glassUniforms} vertexShader={glassVertex} fragmentShader={glassFragment} transparent depthWrite={false} />
+        </mesh>
+      </primitive>
+
+      {/* Ember halo around the porthole and light strips down the front edges. */}
+      <mesh position={[rig.port.x, rig.port.y, rig.front + 0.004]}>
+        <ringGeometry args={[rig.doorRadius + 0.05, rig.doorRadius + 0.068, 96]} />
         <meshBasicMaterial ref={addAccent} color={PALETTE.accent} toneMapped={false} />
       </mesh>
-
-      <ControlPanel shadows={shadows} pose={pose} dial={dial} drawer={drawer} led={led} ringRef={ring} addAccent={addAccent} />
-
-      {/* Ember light strips down the front edges. */}
       {[-1, 1].map((side) => (
-        <mesh key={side} position={[side * (BODY_W / 2 - 0.07), -0.3, FRONT_Z + 0.004]}>
-          <planeGeometry args={[0.016, 1.45]} />
+        <mesh key={side} position={[side * (halfWidth - 0.06), rig.port.y - 0.15, rig.front + 0.004]}>
+          <planeGeometry args={[0.014, 1.3]} />
           <meshBasicMaterial ref={addAccent} color={PALETTE.accent} toneMapped={false} />
         </mesh>
       ))}
 
-      {/* Kick panel with vents. */}
-      <mesh position={[0, -1.02, FRONT_Z + 0.004]}>
-        <planeGeometry args={[1.6, 0.22]} />
-        <meshStandardMaterial color="#16181d" roughness={0.5} metalness={0.3} />
-      </mesh>
-      {[-0.06, 0, 0.06].map((y) => (
-        <mesh key={y} position={[0.55, -1.02 + y, FRONT_Z + 0.008]}>
-          <planeGeometry args={[0.36, 0.018]} />
-          <meshBasicMaterial color="#5a2a0c" toneMapped={false} />
-        </mesh>
-      ))}
+      <PanelLights panel={rig.panel} knob={rig.knob} front={rig.front} pose={pose} leds={leds} pointerRef={knobPointer} addPointerMaterial={addPointerMaterial} />
 
-      <group position={[0, PORT_Y, 0]}>
-        {/* Glowing halo around the porthole. */}
-        <mesh position={[0, 0, FRONT_Z + 0.006]}>
-          <ringGeometry args={[PORT_R + 0.1, PORT_R + 0.118, 96]} />
-          <meshBasicMaterial ref={addAccent} color={PALETTE.accent} toneMapped={false} />
-        </mesh>
-        {/* Porthole bezel and rubber bellows seal. */}
-        <mesh position={[0, 0, FRONT_Z + 0.003]}>
-          <ringGeometry args={[PORT_R - 0.005, PORT_R + 0.1, 64]} />
-          <meshStandardMaterial color="#1c1f25" roughness={0.3} metalness={0.6} />
-        </mesh>
-        <mesh position={[0, 0, FRONT_Z - 0.12]} rotation-x={Math.PI / 2}>
-          <cylinderGeometry args={[PORT_R - 0.01, PORT_R - 0.05, 0.24, 48, 1, true]} />
-          <meshStandardMaterial {...RUBBER} side={THREE.BackSide} />
-        </mesh>
-        <mesh position={[0, 0, FRONT_Z - 0.02]}>
-          <torusGeometry args={[PORT_R - 0.03, 0.035, 12, 64]} />
-          <meshStandardMaterial {...RUBBER} roughness={0.6} />
-        </mesh>
-
-        {/* Drum: perforated stainless cylinder, lifter paddles and a spider hub at the back. */}
-        <group ref={drum}>
-          <mesh rotation-x={Math.PI / 2} position={[0, 0, 0.05]}>
-            <cylinderGeometry args={[0.62, 0.62, 1.5, 48, 1, true]} />
-            <meshStandardMaterial map={drumMap} side={THREE.BackSide} metalness={0.8} roughness={0.3} />
-          </mesh>
-          <mesh position={[0, 0, -0.68]}>
-            <circleGeometry args={[0.62, 48]} />
-            <meshStandardMaterial map={drumMap} metalness={0.8} roughness={0.35} />
-          </mesh>
-          <mesh position={[0, 0, -0.66]} rotation-x={Math.PI / 2}>
-            <cylinderGeometry args={[0.09, 0.11, 0.04, 24]} />
-            <meshStandardMaterial {...CHROME} roughness={0.25} />
-          </mesh>
-          {[0, 1, 2].map((i) => (
-            <group key={i} rotation-z={(i * Math.PI * 2) / 3}>
-              <mesh position={[0, 0.3, -0.665]}>
-                <boxGeometry args={[0.05, 0.5, 0.02]} />
-                <meshStandardMaterial color="#b9c0c6" metalness={0.85} roughness={0.3} />
-              </mesh>
-              {/* Lifter: a ridged paddle along the drum wall. */}
-              {/* Triangular prism lying along the drum axis (cylinders are built along Y). */}
-              <mesh position={[0, 0.56, 0.05]} rotation-x={Math.PI / 2}>
-                <cylinderGeometry args={[0.065, 0.065, 1.4, 3, 1]} />
-                <meshStandardMaterial color="#d4d9de" metalness={0.8} roughness={0.25} flatShading />
-              </mesh>
-            </group>
-          ))}
-        </group>
+      {/* Inside the drum: light, grime, water, bubbles and foam, fitted to the glass. */}
+      <group position={[rig.port.x, rig.port.y, fx.z]} scale={fx.scale}>
         <pointLight ref={interior} position={[0, 0.1, 0.1]} color={WATER_LIGHT} distance={2.2} intensity={0.3} />
-
         <points geometry={grimeGeometry} frustumCulled={false} renderOrder={2}>
-          <shaderMaterial
-            ref={grime}
-            uniforms={grimeUniforms}
-            vertexShader={grimeVertex}
-            fragmentShader={grimeFragment}
-            transparent
-            depthWrite={false}
-          />
+          <shaderMaterial ref={grime} uniforms={grimeUniforms} vertexShader={grimeVertex} fragmentShader={grimeFragment} transparent depthWrite={false} />
         </points>
         <mesh position={[0, 0, 0.62]} renderOrder={3}>
           <circleGeometry args={[0.62, 48]} />
-          <shaderMaterial
-            ref={water}
-            uniforms={waterUniforms}
-            vertexShader={waterVertex}
-            fragmentShader={waterFragment}
-            transparent
-            depthWrite={false}
-          />
+          <shaderMaterial ref={water} uniforms={waterUniforms} vertexShader={waterVertex} fragmentShader={waterFragment} transparent depthWrite={false} />
         </mesh>
         <instancedMesh ref={bubbles} args={[undefined, undefined, bubbleSeeds.length]} renderOrder={4} frustumCulled={false}>
           <sphereGeometry args={[1, 10, 8]} />
@@ -1055,223 +1122,139 @@ function Washer({ pose, budget, shadows }: { pose: PoseRef; budget: TierBudget; 
           <icosahedronGeometry args={[1, 1]} />
           <meshStandardMaterial color="#f7fbff" roughness={0.9} transparent opacity={0.92} />
         </instancedMesh>
-
-        {/* Hinge blocks (fixed to the cabinet). */}
-        {[0.26, -0.26].map((y) => (
-          <mesh key={y} position={[-PORT_R - 0.06, y, FRONT_Z + 0.05]} castShadow={shadows}>
-            <cylinderGeometry args={[0.032, 0.032, 0.13, 16]} />
-            <meshStandardMaterial {...CHROME} />
-          </mesh>
-        ))}
-
-        {/* Door, hinged on the left edge of the porthole. */}
-        <group ref={door} position={[-PORT_R - 0.02, 0, FRONT_Z + 0.06]}>
-          <group position={[PORT_R + 0.02, 0, 0]}>
-            <mesh castShadow={shadows}>
-              <torusGeometry args={[0.65, 0.07, 16, 64]} />
-              <meshStandardMaterial {...CHROME} />
-            </mesh>
-            <mesh position={[0, 0, -0.025]}>
-              <torusGeometry args={[0.585, 0.045, 16, 80]} />
-              <meshStandardMaterial color="#14161a" roughness={0.25} metalness={0.4} />
-            </mesh>
-            <mesh position={[0, 0, -0.01]} renderOrder={6}>
-              <circleGeometry args={[0.6, 64]} />
-              <shaderMaterial
-                ref={glass}
-                uniforms={glassUniforms}
-                vertexShader={glassVertex}
-                fragmentShader={glassFragment}
-                transparent
-                depthWrite={false}
-              />
-            </mesh>
-            {/* Domed glass: mostly clear, it only shows the room's reflections. */}
-            <mesh
-              position={[0, 0, -DOME_R * Math.cos(DOME_THETA)]}
-              rotation-x={Math.PI / 2}
-              renderOrder={7}
-            >
-              <sphereGeometry args={[DOME_R, 64, 12, 0, Math.PI * 2, 0, DOME_THETA]} />
-              <meshStandardMaterial
-                color="#ffffff"
-                transparent
-                opacity={0.18}
-                roughness={0.04}
-                metalness={0}
-               
-                envMapIntensity={2.2}
-                depthWrite={false}
-              />
-            </mesh>
-            {/* Pull handle. */}
-            <mesh position={[0.735, 0, 0.03]} castShadow={shadows}>
-              <capsuleGeometry args={[0.035, 0.24, 6, 16]} />
-              <meshStandardMaterial {...CHROME} />
-            </mesh>
-            <mesh position={[0.7, 0, 0.0]}>
-              <boxGeometry args={[0.08, 0.34, 0.03]} />
-              <meshStandardMaterial color="#14161a" roughness={0.4} />
-            </mesh>
-          </group>
-        </group>
       </group>
     </group>
   );
 }
 
-type RingRef = React.RefObject<THREE.InstancedMesh | null>;
-
-/** Control strip: detergent drawer, face screen, program dial with its LED ring, status LEDs. */
-function ControlPanel({
-  shadows,
+/** Face screen and program dial, mounted on the model's control panel. */
+function PanelLights({
+  panel,
+  knob,
+  front,
   pose,
-  dial,
-  drawer,
-  led,
-  ringRef,
-  addAccent,
+  leds,
+  pointerRef,
+  addPointerMaterial,
 }: {
-  shadows: boolean;
+  panel: THREE.Box3;
+  knob: WasherRig["knob"];
+  front: number;
   pose: PoseRef;
-  dial: React.RefObject<THREE.Group | null>;
-  drawer: React.RefObject<THREE.Group | null>;
-  led: React.RefObject<THREE.MeshBasicMaterial | null>;
-  ringRef: RingRef;
-  addAccent: (material: THREE.MeshBasicMaterial | null) => (() => void) | undefined;
+  leds: THREE.Color[];
+  pointerRef: React.RefObject<THREE.Group | null>;
+  addPointerMaterial: (material: THREE.MeshBasicMaterial | null) => (() => void) | undefined;
 }) {
-  const dots = useMemo(() => Array.from({ length: LED_COUNT }, (_, i) => Math.PI / 2 - (i / LED_COUNT) * Math.PI * 2), []);
-  // One draw call for the whole LED ring; colours are set per instance each frame.
-  const placeDots = useCallback(
-    (mesh: THREE.InstancedMesh | null) => {
-      ringRef.current = mesh;
-      if (!mesh) return;
-      const o = new THREE.Object3D();
-      dots.forEach((a, i) => {
-        o.position.set(Math.cos(a) * LED_RING, Math.sin(a) * LED_RING, 0.004);
-        o.updateMatrix();
-        mesh.setMatrixAt(i, o.matrix);
-        mesh.setColorAt(i, LED_OFF);
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    },
-    [dots, ringRef],
-  );
+  const width = panel.max.x - panel.min.x;
+  const height = panel.max.y - panel.min.y;
+  const panelY = panel.min.y + height * 0.62;
+  const panelZ = Math.max(panel.max.z, front) + 0.006;
+  const faceWidth = Math.min(0.5, width * 0.22);
+  // Without a detected knob, the dial sits flat in the middle of the panel.
+  const dial = knob ?? {
+    centre: new THREE.Vector3((panel.min.x + panel.max.x) / 2, panelY, panelZ),
+    radius: Math.min(width, height) * 0.22,
+    base: panelZ,
+  };
   return (
-    <group position={[0, PANEL_Y, 0]}>
-      {/* Gloss black fascia with a glowing ember trim underneath. */}
-      <mesh position={[0, 0, FRONT_Z + 0.008]}>
-        <boxGeometry args={[1.84, 0.48, 0.012]} />
-        <meshStandardMaterial color="#0c0d10" roughness={0.3} />
-      </mesh>
-      <mesh position={[0, -0.255, FRONT_Z + 0.012]}>
-        <boxGeometry args={[1.84, 0.012, 0.02]} />
-        <meshBasicMaterial ref={addAccent} color={PALETTE.accent} toneMapped={false} />
-      </mesh>
-
-      {/* Detergent drawer: slides out as the cycle is set. The tray hides inside the cabinet. */}
-      <group ref={drawer} position={[-0.66, 0, FRONT_Z + 0.02]}>
-        <mesh castShadow={shadows}>
-          <boxGeometry args={[0.44, 0.36, 0.04]} />
-          <meshStandardMaterial color={GUNMETAL} roughness={0.3} />
-        </mesh>
-        <mesh position={[0, -0.11, 0.021]}>
-          <planeGeometry args={[0.24, 0.05]} />
-          <meshStandardMaterial color="#0c0d10" roughness={0.6} />
-        </mesh>
-        <mesh position={[0, 0, -0.2]}>
-          <boxGeometry args={[0.4, 0.3, 0.36]} />
-          <meshStandardMaterial color="#2a2e36" roughness={0.5} metalness={0.3} />
-        </mesh>
-        <mesh position={[0, 0.151, -0.2]} rotation-x={-Math.PI / 2}>
-          <planeGeometry args={[0.34, 0.3]} />
-          <meshStandardMaterial color="#ff8a2a" roughness={0.35} emissive="#a63c00" emissiveIntensity={0.8} />
-        </mesh>
-      </group>
-
-      {/* Face screen behind a smoked glass bezel. */}
-      <mesh position={[-0.06, 0, FRONT_Z + 0.016]}>
-        <boxGeometry args={[0.8, 0.32, 0.01]} />
-        <meshStandardMaterial color="#0b0f10" roughness={0.1} />
-      </mesh>
-      <mesh position={[-0.06, 0, FRONT_Z + 0.022]}>
-        <planeGeometry args={[0.72, 0.24]} />
+    <>
+      <ProgramDial knob={dial} leds={leds} pointerRef={pointerRef} addPointerMaterial={addPointerMaterial} />
+      <mesh position={[panel.min.x + faceWidth * 0.7, panelY, panelZ]}>
+        <planeGeometry args={[faceWidth, faceWidth / 3]} />
         <FaceScreen pose={pose} />
       </mesh>
+    </>
+  );
+}
 
-      {/* Program dial: chrome skirt, knurled grip, ember pointer. */}
-      <group position={[DIAL_X, 0, FRONT_Z + 0.014]}>
-        <mesh rotation-x={Math.PI / 2} position={[0, 0, 0.01]}>
-          <cylinderGeometry args={[0.16, 0.16, 0.012, 48]} />
-          <meshStandardMaterial {...CHROME} roughness={0.2} />
-        </mesh>
-        <group ref={dial}>
-          <mesh rotation-x={Math.PI / 2} position={[0, 0, 0.05]} castShadow={shadows}>
-            <cylinderGeometry args={[0.125, 0.135, 0.08, 48]} />
-            <meshStandardMaterial {...CHROME} />
-          </mesh>
-          {/* Knurled grip: a faceted sleeve catches the light like ridges. */}
-          <mesh rotation-x={Math.PI / 2} position={[0, 0, 0.05]}>
-            <cylinderGeometry args={[0.14, 0.14, 0.06, 28, 1]} />
-            <meshStandardMaterial {...CHROME} roughness={0.3} flatShading />
-          </mesh>
-          <mesh position={[0, 0, 0.091]}>
-            <circleGeometry args={[0.105, 48]} />
-            <meshStandardMaterial color="#14161a" roughness={0.2} />
-          </mesh>
-          <mesh position={[0, 0.06, 0.093]}>
-            <planeGeometry args={[0.018, 0.075]} />
-            <meshBasicMaterial color={PALETTE.accent} toneMapped={false} />
-          </mesh>
-        </group>
-        {/* Progress LEDs around the dial. */}
-        <instancedMesh ref={placeDots} args={[undefined, undefined, LED_COUNT]} frustumCulled={false}>
-          <circleGeometry args={[0.014, 12]} />
-          <meshBasicMaterial toneMapped={false} />
-        </instancedMesh>
-      </group>
-
-      {/* Status LEDs. */}
-      <mesh position={[0.84, 0, FRONT_Z + 0.016]}>
-        <circleGeometry args={[0.03, 16]} />
-        <meshBasicMaterial ref={led} color={PALETTE.mint} toneMapped={false} />
+/**
+ * The program dial: a raised graphite bezel around the knob carrying the LED ring and a
+ * tick scale, plus a glowing pointer on the knob itself. The bezel's face stands proud of
+ * the panel, close to the knob's own face, so the camera's downward view can't slide the
+ * ring off-centre or tuck its lower LEDs behind the knob.
+ */
+function ProgramDial({
+  knob,
+  leds,
+  pointerRef,
+  addPointerMaterial,
+}: {
+  knob: NonNullable<WasherRig["knob"]>;
+  leds: THREE.Color[];
+  pointerRef: React.RefObject<THREE.Group | null>;
+  addPointerMaterial: (material: THREE.MeshBasicMaterial | null) => (() => void) | undefined;
+}) {
+  const { centre, radius, base } = knob;
+  const inner = radius * 1.1;
+  const outer = radius * 1.88;
+  const depth = Math.max(0.004, centre.z - base);
+  const faceZ = base + depth * 0.55;
+  const uniforms = useMemo(
+    () => ({ uLed: { value: leds }, uInner: { value: inner }, uOuter: { value: outer } }),
+    [leds, inner, outer],
+  );
+  return (
+    <group position={[centre.x, centre.y, 0]}>
+      {/* Bezel wall from the panel up to the face. */}
+      <mesh position={[0, 0, base + (faceZ - base) / 2]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[outer, outer * 1.03, faceZ - base, 64, 1, true]} />
+        <meshStandardMaterial color="#16181c" metalness={0.7} roughness={0.35} />
       </mesh>
-      {[-0.1, 0.1].map((y) => (
-        <mesh key={y} position={[0.84, y, FRONT_Z + 0.016]}>
-          <circleGeometry args={[0.022, 16]} />
-          <meshBasicMaterial color="#3a3330" />
+      <mesh position={[0, 0, faceZ]}>
+        <ringGeometry args={[inner, outer, 96, 4]} />
+        <shaderMaterial uniforms={uniforms} vertexShader={dialVertex} fragmentShader={dialFragment} />
+      </mesh>
+      {/* Pointer: a lit notch near the knob's rim, with a soft halo. */}
+      <group ref={pointerRef} position={[0, 0, centre.z + 0.003]}>
+        <mesh position={[0, radius * 0.68, 0.0005]}>
+          <circleGeometry args={[radius * 0.075, 20]} />
+          <meshBasicMaterial ref={addPointerMaterial} toneMapped={false} />
         </mesh>
-      ))}
+        <mesh position={[0, radius * 0.68, 0]}>
+          <circleGeometry args={[radius * 0.2, 24]} />
+          <meshBasicMaterial ref={addPointerMaterial} toneMapped={false} transparent opacity={0.28} depthWrite={false} blending={THREE.AdditiveBlending} />
+        </mesh>
+      </group>
     </group>
   );
 }
 
-/** Dimmed neighbouring machine (static). */
+/** Dimmed neighbouring machine: a static copy of the model. */
 function WasherShell({ x }: { x: number }) {
+  const source = useWasherModel();
+  const shell = useMemo(() => {
+    const copy = source.clone(true);
+    prepareMaterials(copy);
+    const box = new THREE.Box3().setFromObject(copy);
+    const k = BODY_H / (box.max.y - box.min.y);
+    const centre = box.getCenter(new THREE.Vector3());
+    copy.scale.multiplyScalar(k);
+    copy.position.set(-centre.x * k, -box.min.y * k, -centre.z * k);
+    // Own, darker materials so the neighbours sit back in the room.
+    copy.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const dim = (m: THREE.Material) => {
+        const c = (m as THREE.MeshStandardMaterial).clone();
+        c.color.multiplyScalar(0.45);
+        return c;
+      };
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(dim) : dim(mesh.material);
+    });
+    return copy;
+  }, [source]);
+  useEffect(
+    () => () =>
+      shell.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach((m) => m.dispose());
+      }),
+    [shell],
+  );
   return (
-    <group position={[x, BODY_Y, -0.15]}>
-      <mesh geometry={getBodyGeometry()}>
-        <meshStandardMaterial color="#25282e" roughness={0.35} metalness={0.45} />
-      </mesh>
-      <mesh position={[0, BODY_H / 2 + 0.05, 0]}>
-        <boxGeometry args={[BODY_W + 0.06, 0.05, BODY_D + 0.06]} />
-        <meshStandardMaterial color="#1d2025" roughness={0.5} metalness={0.4} />
-      </mesh>
-      <mesh position={[0, PANEL_Y, FRONT_Z + 0.008]}>
-        <boxGeometry args={[1.84, 0.48, 0.012]} />
-        <meshStandardMaterial color="#0c0d10" roughness={0.35} />
-      </mesh>
-      <group position={[0, PORT_Y, FRONT_Z + 0.06]}>
-        <mesh>
-          <torusGeometry args={[0.65, 0.07, 16, 48]} />
-          <meshStandardMaterial {...CHROME} roughness={0.25} />
-        </mesh>
-        <mesh position={[0, 0, -0.4]}>
-          <circleGeometry args={[0.62, 48]} />
-          <meshStandardMaterial color="#1a1e22" metalness={0.6} roughness={0.4} />
-        </mesh>
-      </group>
+    <group position={[x, 0, -0.15]}>
+      <primitive object={shell} />
     </group>
   );
 }
@@ -1311,28 +1294,15 @@ function Clothesline() {
 
 /** Plane resolution for the cloth: enough vertices for smooth folds (all displacement is on the GPU). */
 const SEGMENTS = 40;
-
-/** The photo itself: hangs on the line, gets washed, and is hung back up. Pixels are never altered. */
-function Laundry({ photo, pose, budget }: { photo: PhotoTexture | null; pose: PoseRef; budget: TierBudget }) {
-  const mesh = useRef<THREE.Mesh>(null);
-  const pins = useRef<THREE.Group>(null);
+/** The photos on the line, in the drum and back out. Pixels are never altered. */
+function Laundry({ garments, pose, budget }: { garments: readonly ChamberSubject[]; pose: PoseRef; budget: TierBudget }) {
+  const shown = garments.slice(0, MAX_GARMENTS);
+  // On phones the camera sees less of the line than its full length: lay photos out within view.
+  const size = useThree((s) => s.size);
+  const lineSpan = usableLineSpan(size.width / Math.max(1, size.height));
+  const slots = useMemo(() => lineSlots(shown.length, lineSpan, HANG_MAX.width), [shown.length, lineSpan]);
   const sparkles = useRef<THREE.ShaderMaterial>(null);
-  const geometry = useDispose(useMemo(() => new THREE.PlaneGeometry(1, 1, SEGMENTS, SEGMENTS), []));
-  const clothUniforms = useMemo(
-    () => ({
-      uMap: { value: null as THREE.Texture | null },
-      uMapTransform: { value: new THREE.Matrix3() },
-      uTime: { value: 0 },
-      uSway: { value: 0.03 },
-      uCrumple: { value: 0 },
-      uPin: { value: 1 },
-      uScale: { value: new THREE.Vector2(1, 1) },
-      uWet: { value: 0 },
-    }),
-    [],
-  );
-  const cloth = useRef({ pin: 1, wet: 0 });
-  const clothMaterial = useRef<THREE.ShaderMaterial>(null);
+  const sparkleGroup = useRef<THREE.Points>(null);
   const sparkleCount = budget.particles > 40 ? 28 : 12;
   const sparkleGeometry = useDispose(
     useMemo(() => {
@@ -1353,119 +1323,26 @@ function Laundry({ photo, pose, budget }: { photo: PhotoTexture | null; pose: Po
   );
   const sparkleUniforms = useMemo(() => ({ uTime: { value: 0 }, uShow: { value: 0 }, uSize: { value: 220 }, uColor: { value: CLEAN.clone() } }), []);
   const dpr = useThree((s) => s.viewport.dpr);
+  // Sparkles stretch to cover the whole row of photos.
+  const span = slots.length ? slots[slots.length - 1].x - slots[0].x + slots[0].width : HANG_MAX.width;
 
-  const track = useRef({ shown: false, since: 0 });
-  const hang = useRef(new THREE.Vector3());
-  const target = useRef(new THREE.Vector3());
-
-  useFrame((_, rawDt) => {
-    const dt = Math.min(rawDt, 0.1);
-    const m = mesh.current;
-    if (!m) return;
+  useFrame(() => {
     const p = pose.current;
-    const now = p.time;
-    const visible = !!photo && p.garment !== "hidden";
-    m.visible = visible;
     const sp = sparkles.current;
     if (sp) {
-      sp.uniforms.uTime.value = now;
-      sp.uniforms.uShow.value = visible ? p.sparkle : 0;
+      sp.uniforms.uTime.value = p.time;
+      sp.uniforms.uShow.value = shown.length > 0 && p.garment !== "hidden" ? p.sparkle : 0;
       sp.uniforms.uSize.value = 220 * dpr;
     }
-    if (!visible || !photo) {
-      track.current.shown = false;
-      return;
-    }
-    // A fresh photo drops onto the line from above.
-    if (!track.current.shown) track.current = { shown: true, since: now };
-    const drop = p.garment === "hang" ? easeOutBack(seg(now - track.current.since, 0, 0.7)) : 1;
-
-    const { width, height } = fitPhoto(photo.aspect, HANG_MAX.width, HANG_MAX.height);
-    hang.current.set(0, lineY(0) - height / 2 + 0.02 + (1 - drop) * 2.6, LINE_Z);
-    const pos = target.current;
-
-    let scale = 1;
-    let sway = 0.03 + p.tug * 0.08;
-    let crumple = 0;
-    let spinZ = 0;
-    let tiltX = 0;
-    let pinned = true;
-    const inside = DRUM;
-
-    switch (p.garment) {
-      case "in": {
-        pos.copy(hang.current).lerp(inside, p.flight);
-        scale = lerp(1, 0.5, p.flight);
-        spinZ = p.flight * Math.PI * 1.5;
-        tiltX = Math.sin(p.flight * Math.PI) * -0.6;
-        crumple = p.flight * 0.08;
-        pinned = p.flight < 0.05;
-        break;
-      }
-      case "drum": {
-        // Tumble around inside the drum, lagging the drum like real laundry.
-        const spin = Math.abs(p.spin) > 0.5;
-        const a = spin ? now * 3.2 + Math.sin(now * 2.3) * 0.6 : -Math.PI / 2;
-        const r = spin ? 0.16 + Math.sin(now * 1.7) * 0.05 : 0.12;
-        pos.set(inside.x + Math.cos(a) * r, inside.y + Math.sin(a) * r - 0.05, inside.z + Math.sin(now * 3.1) * 0.06);
-        scale = 0.5;
-        crumple = spin ? 0.1 : 0.05;
-        spinZ = spin ? a * 1.3 : 0.3;
-        tiltX = spin ? Math.sin(now * 2.7) * 0.5 : 0.2;
-        sway = 0;
-        pinned = false;
-        break;
-      }
-      case "out": {
-        pos.copy(inside).lerp(hang.current, p.flight);
-        scale = lerp(0.5, 1, p.flight);
-        spinZ = (1 - p.flight) * Math.PI * 2;
-        crumple = 0.08 * (1 - p.flight);
-        pinned = p.flight > 0.95;
-        break;
-      }
-      default:
-        pos.copy(hang.current);
-    }
-
-    m.position.copy(pos);
-    m.rotation.set(tiltX, Math.sin(now * 1.3) * sway * 2, spinZ);
-    m.scale.set(width * scale, height * scale, 1);
-    if (pins.current) pins.current.visible = pinned;
-
-    // Cloth: soaked in the drum, then drying from the top down once it is back on the line.
-    const c = cloth.current;
-    c.pin = damp(c.pin, pinned ? 1 : 0, 6, dt);
-    if (p.garment === "drum" && p.water > 0.5) c.wet = 1;
-    else if (p.garment === "hang") c.wet = Math.max(0, c.wet - dt / 6);
-    const u = clothMaterial.current?.uniforms;
-    if (u) {
-      u.uMap.value = photo.texture;
-      photo.texture.updateMatrix();
-      (u.uMapTransform.value as THREE.Matrix3).copy(photo.texture.matrix);
-      u.uTime.value = now;
-      u.uSway.value = sway;
-      u.uCrumple.value = crumple;
-      u.uPin.value = c.pin;
-      (u.uScale.value as THREE.Vector2).set(width * scale, height * scale);
-      u.uWet.value = c.wet;
-    }
+    sparkleGroup.current?.scale.set(Math.max(1, span / HANG_MAX.width), 1, 1);
   });
 
   return (
     <>
-      <mesh ref={mesh} geometry={geometry} visible={false}>
-        <shaderMaterial ref={clothMaterial} uniforms={clothUniforms} vertexShader={clothVertex} fragmentShader={clothFragment} side={THREE.DoubleSide} />
-        <group ref={pins} position={[0, 0.5, 0.02]}>
-          {[-0.32, 0.32].map((x) => (
-            <mesh key={x} position={[x, 0, 0]}>
-              <boxGeometry args={[0.045, 0.14, 0.035]} />
-              <meshStandardMaterial color={PALETTE.accent} roughness={0.5} />
-            </mesh>
-          ))}
-        </group>
-      </mesh>
-      <points geometry={sparkleGeometry} position={[0, lineY(0) - 0.6, LINE_Z]} frustumCulled={false} renderOrder={8}>
+      {shown.map((g, i) => (
+        <Garment key={g.key} subject={g} index={i} count={shown.length} slot={slots[i]} pose={pose} />
+      ))}
+      <points ref={sparkleGroup} geometry={sparkleGeometry} position={[0, lineY(0) - 0.6, LINE_Z]} frustumCulled={false} renderOrder={8}>
         <shaderMaterial
           ref={sparkles}
           uniforms={sparkleUniforms}
@@ -1477,6 +1354,153 @@ function Laundry({ photo, pose, budget }: { photo: PhotoTexture | null; pose: Po
         />
       </points>
     </>
+  );
+}
+
+/** One photo: hangs in its slot on the line, gets washed with the others, and is hung back up. */
+function Garment({ subject, index, count, slot, pose }: { subject: ChamberSubject; index: number; count: number; slot: Slot; pose: PoseRef }) {
+  const photo = usePhoto(subject);
+  // A texture that finishes decoding changes nothing three.js can see, so ask for a frame:
+  // on demand-rendered (idle/slow) stages the drop onto the line would otherwise never start.
+  const invalidate = useThree((s) => s.invalidate);
+  useEffect(() => {
+    if (photo) invalidate();
+  }, [photo, invalidate]);
+  const mesh = useRef<THREE.Mesh>(null);
+  const pins = useRef<THREE.Group>(null);
+  const geometry = useDispose(useMemo(() => new THREE.PlaneGeometry(1, 1, SEGMENTS, SEGMENTS), []));
+  const clothUniforms = useMemo(
+    () => ({
+      uMap: { value: null as THREE.Texture | null },
+      uMapTransform: { value: new THREE.Matrix3() },
+      uTime: { value: 0 },
+      uSway: { value: 0.03 },
+      uCrumple: { value: 0 },
+      uPin: { value: 1 },
+      uScale: { value: new THREE.Vector2(1, 1) },
+      uWet: { value: 0 },
+    }),
+    [],
+  );
+  const cloth = useRef({ pin: 1, wet: 0 });
+  const clothMaterial = useRef<THREE.ShaderMaterial>(null);
+  const track = useRef({ shown: false, since: 0 });
+  const hang = useRef(new THREE.Vector3());
+  const target = useRef(new THREE.Vector3());
+  // Each photo has its own place on the drum's circle, so a batch tumbles without stacking.
+  const phase = (index / Math.max(1, count)) * Math.PI * 2;
+
+  useFrame(({ invalidate }, rawDt) => {
+    const dt = Math.min(rawDt, 0.1);
+    const m = mesh.current;
+    if (!m) return;
+    const p = pose.current;
+    const now = p.time;
+    const visible = !!photo && p.garment !== "hidden";
+    m.visible = visible;
+    if (!visible || !photo) {
+      track.current.shown = false;
+      return;
+    }
+    // A fresh photo drops onto the line from above, a beat after its neighbour.
+    if (!track.current.shown) track.current = { shown: true, since: now + index * 0.08 };
+    const sinceDrop = now - track.current.since;
+    const drop = p.garment === "hang" ? easeOutBack(seg(sinceDrop, 0, 0.7)) : 1;
+    // The drop must finish even when idle frames are rationed (slow devices).
+    if (sinceDrop < 0.7) invalidate();
+
+    const { width, height } = fitPhoto(photo.aspect, slot.width, HANG_MAX.height);
+    hang.current.set(slot.x, lineY(slot.x) - height / 2 + 0.02 + (1 - drop) * 2.6, LINE_Z);
+    const pos = target.current;
+
+    // A photo whose own cleaning failed stays in the drum when the others come out.
+    const garment = subject.failed && p.returning ? "drum" : p.garment;
+    const flight = staggered(p.flight, index, count);
+    // In the drum every photo shrinks to a similar size, so a batch fits behind the glass.
+    const drumWidth = count === 1 ? 0.55 : 0.42;
+    const drumScale = Math.min(1, drumWidth / width);
+    const inside = drumAnchor;
+
+    let scale = 1;
+    let sway = 0.03 + p.tug * 0.08;
+    let crumple = 0;
+    let spinZ = 0;
+    let tiltX = 0;
+    let pinned = true;
+
+    switch (garment) {
+      case "in": {
+        pos.copy(hang.current).lerp(inside, flight);
+        scale = lerp(1, drumScale, flight);
+        spinZ = flight * Math.PI * 1.5;
+        tiltX = Math.sin(flight * Math.PI) * -0.6;
+        crumple = flight * 0.08;
+        pinned = flight < 0.05;
+        break;
+      }
+      case "drum": {
+        // Tumble around inside the drum, lagging the drum like real laundry.
+        const spin = Math.abs(p.spin) > 0.5;
+        const a = spin ? now * 3.2 + phase + Math.sin(now * 2.3 + phase) * 0.6 : -Math.PI / 2 + (index - (count - 1) / 2) * 0.35;
+        const r = spin ? (count === 1 ? 0.16 : 0.2) + Math.sin(now * 1.7 + phase) * 0.05 : 0.12;
+        pos.set(inside.x + Math.cos(a) * r, inside.y + Math.sin(a) * r - 0.05, inside.z + Math.sin(now * 3.1 + phase) * 0.06 + index * 0.004);
+        scale = drumScale;
+        crumple = spin ? 0.1 : 0.05;
+        spinZ = spin ? a * 1.3 : 0.3 + index * 0.4;
+        tiltX = spin ? Math.sin(now * 2.7 + phase) * 0.5 : 0.2;
+        sway = 0;
+        pinned = false;
+        break;
+      }
+      case "out": {
+        pos.copy(inside).lerp(hang.current, flight);
+        scale = lerp(drumScale, 1, flight);
+        spinZ = (1 - flight) * Math.PI * 2;
+        crumple = 0.08 * (1 - flight);
+        pinned = flight > 0.95;
+        break;
+      }
+      default:
+        pos.copy(hang.current);
+    }
+
+    m.position.copy(pos);
+    m.rotation.set(tiltX, Math.sin(now * 1.3 + phase) * sway * 2, spinZ);
+    m.scale.set(width * scale, height * scale, 1);
+    if (pins.current) pins.current.visible = pinned;
+
+    // Cloth: soaked in the drum, then drying from the top down once it is back on the line.
+    const c = cloth.current;
+    c.pin = damp(c.pin, pinned ? 1 : 0, 6, dt);
+    if (garment === "drum" && p.water > 0.5) c.wet = 1;
+    else if (garment === "hang") c.wet = Math.max(0, c.wet - dt / 6);
+    const u = clothMaterial.current?.uniforms;
+    if (u) {
+      u.uMap.value = photo.texture;
+      photo.texture.updateMatrix();
+      (u.uMapTransform.value as THREE.Matrix3).copy(photo.texture.matrix);
+      // Neighbours sway slightly out of step.
+      u.uTime.value = now + index * 1.7;
+      u.uSway.value = sway;
+      u.uCrumple.value = crumple;
+      u.uPin.value = c.pin;
+      (u.uScale.value as THREE.Vector2).set(width * scale, height * scale);
+      u.uWet.value = c.wet;
+    }
+  });
+
+  return (
+    <mesh ref={mesh} geometry={geometry} visible={false}>
+      <shaderMaterial ref={clothMaterial} uniforms={clothUniforms} vertexShader={clothVertex} fragmentShader={clothFragment} side={THREE.DoubleSide} />
+      <group ref={pins} position={[0, 0.5, 0.02]}>
+        {[-0.32, 0.32].map((x) => (
+          <mesh key={x} position={[x, 0, 0]}>
+            <boxGeometry args={[0.045, 0.14, 0.035]} />
+            <meshStandardMaterial color={PALETTE.accent} roughness={0.5} />
+          </mesh>
+        ))}
+      </group>
+    </mesh>
   );
 }
 
@@ -1514,9 +1538,9 @@ function FaceScreen({ pose }: { pose: PoseRef }) {
 function drawFace(g: CanvasRenderingContext2D, face: Face, t: number) {
   const error = face === "error";
   const glow = error ? PALETTE.fault : PALETTE.accent;
-  g.fillStyle = error ? "#1a0707" : "#140802";
+  g.fillStyle = error ? "#1a0707" : "#0b0816";
   g.fillRect(0, 0, FACE_W, FACE_H);
-  g.fillStyle = error ? "rgba(255,92,108,0.06)" : "rgba(255,122,26,0.06)";
+  g.fillStyle = error ? "rgba(255,92,108,0.06)" : "rgba(157,140,255,0.06)";
   for (let y = 0; y < FACE_H; y += 3) g.fillRect(0, y, FACE_W, 1);
 
   g.fillStyle = glow;
@@ -1562,7 +1586,7 @@ function drawFace(g: CanvasRenderingContext2D, face: Face, t: number) {
       case "excited":
         g.arc(x, eyeY, 9, 0, Math.PI * 2);
         g.fill();
-        g.fillStyle = "#140802";
+        g.fillStyle = "#0b0816";
         g.fillRect(x + 1, eyeY - 6, 4, 4);
         g.fillStyle = glow;
         break;

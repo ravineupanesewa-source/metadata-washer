@@ -64,27 +64,18 @@ Without your explicit opt-in, CleanFrame never re-encodes.
 
 ## Visual design and 3D
 
-**Night & lime.** Dark is the default theme: near-black surfaces with an electric lime accent (`--lime: #c6f432`), modelled on a dark neon reference design. Light mode remains available and keeps the mint palette. The hero, carousel, footer and chamber interior are always dark showcase surfaces.
+**The metadata laundromat.** The page is one full-screen stage: a 3D front-loading washer (`decontamination/washer-scene.tsx`) on a dark graphite set with soft lavender light, cyan for "verified clean" and red for faults. Photos hang on a clothesline, go into the drum, and come back out once the server has really answered. Below the stage, a server-rendered guide (`components/guide.tsx`) explains the process and answers common questions. It is the page's crawlable content and mirrors the FAQ structured data.
 
-### Landing page (`src/features/landing/`)
-| Section | What it is |
-| --- | --- |
-| Hero (`hero.tsx`, `hero-scene.tsx`) | A **procedural 3D mascot**, a glossy lime jelly bean with a face, in React Three Fiber. Its custom jelly shader combines depth gradient, Fresnel rim, fake subsurface glow, two specular highlights, an environment band and slow internal density. The face is raycast onto the sculpted surface. It follows the cursor, blinks and breathes. Behind it, a full-screen **light-ray shader** draws crossing lime beams with flowing streaks, a Gaussian core glow, point glitter and a vignette; beams are slimmer and dimmer on portrait screens. Orbiting "metadata" motes spiral in and are absorbed |
-| Hero pill | A glass "drop a photo" pill. Clicking it opens the **real** file picker; dropping files adds them to the **real** queue (via `image-sanitizer/intake.ts`, a same-document event channel). The header's lime **Clean a photo** button does the same |
-| Carousel (`feature-carousel.tsx`, `card-art.ts`) | Five glass cards (Drop, Inspect, Scrub, Verify, Download) with **shader-generated art**: violet aurora arc, flame ribbons, leaf with veins and water droplets, light wave, rim-lit orb. **One shared offscreen WebGL2 context** paints all cards and copies the pixels into each card's 2D canvas. Only the active, visible card animates (~30 fps). Accessible as a carousel: named slides, Previous/Next buttons, arrow keys and a live status |
-| Footer (`site-footer.tsx`) | A giant outline **CleanFrame** wordmark (SVG, lime→violet gradient stroke, always fits its width) over a violet light sweep, plus footer links and the "How it works & guarantees" dialog |
-
-**No downloaded 3D models.** Sketchfab downloads need an account and API token, licences vary (CC-BY attribution, non-commercial clauses), and the CSP blocks third-party loading, so a model would have to be bundled. The mascot is built from code instead: no licence obligations and zero asset weight.
+**The washer model** is served from `public/models/washer.glb` (~3 MB). The unoptimised originals (~43 MB) live in `assets/source/`, outside `public/`, so they are neither served nor copied into the Docker image. The loader registers the meshopt decoder, so a compressed re-export loads as-is (see `assets/source/README.md`).
 
 **Performance budget** (`src/lib/perf/perf-tier.ts`):
-- One app-wide probe measures the frame rate once: a 1 s warm-up, then 2 s of frames. Its result is mirrored to `<html data-perf>`.
-- `high` (≥ 40 fps): effects animate.
-- `low` (slow GPU, software rendering, or reduced motion): the hero, card art and chamber idle each render one settled frame.
-- Off-screen sections never render.
+- One app-wide probe measures the frame rate once the stage has booted: a 1 s warm-up, then 2 s of frames. Its result is mirrored to `<html data-perf>`.
+- The neighbouring machines and idle motion are drawn from the first frame, so the preloader reveals the whole row and the probe times it.
+- `high` (≥ 40 fps): reflections, shadows and the richer room shader ease in on top.
+- `low` (slow GPU, software rendering, or reduced motion): the neighbours are dropped, and idle renders one settled frame.
+- Off-screen stages never render.
 - The essential cleaning animation never depends on the probe.
-- three.js and React Three Fiber stay code-split, not in the initial page load (verified).
-
-> Replaced: the React Bits **LaserFlow** beam from the previous iteration was removed. This design's hero light rays take its place, and having two full-screen WebGL effects measurably starved slower devices.
+- three.js and React Three Fiber stay code-split, not in the initial page load. The model download starts from a `<link rel="preload">` in the HTML, in parallel with that chunk.
 
 ### The chamber is the upload surface
 The stage (`decontamination/chamber-stage.tsx`) is the drop target. It holds the 3D chamber, the status line read by screen readers, and the primary action:
@@ -116,7 +107,7 @@ The stage (`decontamination/chamber-stage.tsx`) is the drop target. It holds the
 ### React Three Fiber + custom GLSL
 - **React Three Fiber 9.8.1.** It supports React `>=19 <19.4` (the app has 19.3.0) and three `>=0.156` (the app has 0.186.1). I pinned 9.8.1 rather than 9.8.2, which was exactly two weeks old at the time.
 - **Structure:**
-  - React declares the scene (`chamber-scene.tsx`). All motion runs in `useFrame` through refs and shader uniforms.
+  - React declares the scene (`washer-scene.tsx`). All motion runs in `useFrame` through refs and shader uniforms.
   - A single driver samples the run's timeline once per frame, so nothing calls `setState` per frame.
   - The canvas (`chamber-canvas.tsx`) is loaded with `next/dynamic({ ssr: false })` and is code-split. Its ~945 KB chunk isn't part of the initial page load (verified).
 - **Shaders** (`shaders.ts`, compiled by `THREE.ShaderMaterial`, so no build-time loader is needed):
@@ -130,8 +121,8 @@ The stage (`decontamination/chamber-stage.tsx`) is the drop target. It holds the
 ### Performance, fallbacks, accessibility
 - **Rendering policy:**
   - run or drag: every frame;
-  - idle or ready: 24 fps;
-  - reduced motion: a single static frame;
+  - idle or ready: every frame, vsync-paced (a timer-driven low rate read as stutter, especially in the pointer parallax), on devices that pass the frame-rate probe;
+  - reduced motion or a slow device: a short settle, then a single static frame;
   - finished: renders briefly to settle, then stops;
   - off-screen: nothing.
 - **Pixel ratio:** capped at 2× (1.5× on compact and reduced tiers).
@@ -225,6 +216,7 @@ Every variable is optional and validated with Zod at startup. An invalid value s
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `NEXT_PUBLIC_SITE_URL` | `http://localhost:3000` | **Build time.** Public origin used for canonical URLs, Open Graph, `sitemap.xml` and `robots.txt` |
 | `CLEANFRAME_MAX_FILE_SIZE_MB` | `25` | Per-file size limit, enforced on the server while streaming |
 | `CLEANFRAME_MAX_FILES_PER_BATCH` | `20` | Files the UI accepts per batch |
 | `CLEANFRAME_PROCESSING_CONCURRENCY` | `2` | Images processed in parallel, which is also the ExifTool process pool size. The UI uses `min(this, 3)` parallel uploads |
@@ -237,19 +229,59 @@ The home page is prerendered at build time, so the limits shown in the UI are th
 
 **Memory:** each in-flight request holds the upload (up to `MAX_FILE_SIZE`) plus the output in memory, so peak usage is roughly `concurrency × 2 × max size`, plus about 30 MB per ExifTool process. Opt-in re-encoding decodes the full image (about `width × height × 4` bytes). Size your container for that.
 
+## Sound
+
+The washer has sound, synthesized live with the Web Audio API (`src/lib/audio/`): **no audio files, no licences, and it plays on every modern browser, iOS included.** Synthesis also lets the sound follow the animation: the motor's pitch climbs as the drum spins up, the water sloshes at the drum's rate, and the drain gurgles as it empties.
+
+| Moment | Sound |
+| --- | --- |
+| Photo added | soft plip + peg click |
+| Remove metadata | mechanical ka-chunk |
+| Door opens / shuts | latch click + air / low thud |
+| Washing | motor hum (rising with spin), water slosh, fill gush, bubbles |
+| Rinse | motor winds down, drain gurgle |
+| Clean | bell-chime arpeggio |
+| Jam | two-pulse buzzer |
+| Download / support sent | light pop / celebratory sparkle |
+| Files dragged over / away | airy swell with a low bloom / falling whoosh |
+| Choose files · unsupported file | soft key tap · two rubbery bonks |
+| Photo removed · Clear all | swish + falling pop · long sweep with pegs popping off |
+| Show results · Download all | rising sweep + D-major bloom · zipper ratchet, then the pop |
+| Dialogs · switches · radios · copy | swoosh in/out · click up/down · tick · two-note blip |
+
+**Background music** (`ambience.ts`): a generative pad in D major (Dmaj9 → Bm9 → Gmaj9 → A6/9, 9 s per chord with long crossfades) on detuned soft voices, a drifting low-pass and a quiet sine bass, with sparse soap-bubble plucks (always notes of the current chord) through a dotted echo. It never loops exactly. It follows the wash (`moodFor` in `sound-cues.ts`): ducks and darkens while the washer runs, blooms brighter when the photo comes out clean, and drops dark on a jam. Settings has a **Background music** switch; the dock's speaker button still mutes everything.
+
+- **Which sound when** is a pure function of app state (`sound-cues.ts`, unit-tested); the synthesizer (`sound-engine.ts`) knows nothing about React. Interface sounds are played by the components that own the action (dialogs, switches and radios in `components/ui/`).
+- **Mixing:** effects and music on separate buses, both sending to one generated room reverb (so clicks, washer and music share a space), into the mute and a master compressor. Quiet UI levels, 3–5 ms attacks (no clicks), exponential decays. Measured on the real output: music at rest about −34 dB RMS, effects 10–15 dB above it, everything together peaks about −6.4 dBFS with zero clipped samples (`tests/e2e/sound.spec.ts` checks the wash mix).
+- **Manners:** nothing plays before the first interaction (browser autoplay policy), the music fades in over a few seconds, the dock's speaker button mutes everything and is remembered on the device (as is the music switch), and audio suspends in hidden tabs.
+
+**Why not downloaded clips?** Free CC0 libraries were evaluated: [Kenney Interface Sounds](https://kenney.nl/assets/interface-sounds) (CC0, 100 UI sounds) and CC0 sets on [OpenGameArt](https://opengameart.org/content/bubble-sound-effects) are good; [Pixabay](https://pixabay.com/service/faq/)'s licence is custom, not CC0. They ship as OGG, which iOS Safari only plays from 18.4, so clips would have meant transcoding and still couldn't react to the drum's speed. To add a recorded clip anyway, convert it to MP3 or AAC, put it in `public/sounds/`, and decode it once in `sound-engine.ts` with `decodeAudioData`.
+
+## Optional support modal (eSewa)
+
+About half a second after someone downloads a cleaned file, an optional "Keep the washer running" modal can ask for a tip through eSewa. It shows the visitor's own results (for example "You just scrubbed 31 hidden fields… including your GPS location"), suggested tips (Rs 50 / 150 / 500; a personal eSewa QR can't carry an amount, so they're guidance), your QR and a copyable eSewa ID. On phones the ID comes first and the QR can be saved to the gallery, since you can't scan your own screen.
+
+It never blocks or delays the download. Close, "Maybe later", Escape or clicking outside dismiss it for 14 days on that device; "I've sent it" (honour system) shows a thank-you and dismisses it for 60 days. That's one timestamp in the visitor's own localStorage; nothing is sent anywhere.
+
+1. Save your eSewa QR as `public/support/esewa-qr.png`.
+2. Set your eSewa ID (and optionally your name and the suggested tips) in [`src/features/support/support-config.ts`](./src/features/support/support-config.ts).
+3. Rebuild.
+
+A missing QR file just leaves the QR out (the ID still works). Leave both `qrImage` and `esewaId` empty to switch the modal off.
+
 ## Deployment
 
 **Supported:** any long-running Node.js 24 host or container with Perl. A production-ready [`Dockerfile`](./Dockerfile) is included. It installs Perl and `jpegtran`, runs as a non-root user, uses a private temp dir, and has a health check.
 
 ```bash
-docker build -t cleanframe .
+docker build --build-arg NEXT_PUBLIC_SITE_URL=https://your.domain -t cleanframe .
 docker run -p 3000:3000 --read-only --tmpfs /tmp:rw,mode=1777 -e CLEANFRAME_TEMP_DIR=/tmp cleanframe
 ```
 
 Without Docker:
 
 ```bash
-npm ci && npm run build
+npm ci && NEXT_PUBLIC_SITE_URL=https://your.domain npm run build
 cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/
 PORT=3000 node .next/standalone/server.js
 ```

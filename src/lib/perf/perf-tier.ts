@@ -19,7 +19,25 @@ export type PerfTier = "pending" | "high" | "low";
 const MIN_FPS = 40;
 let tier: PerfTier = "pending";
 let started = false;
+/** Outstanding holds: while any exist the probe waits (see holdPerfProbe). */
+let holds = 0;
+let wanted = false;
 const listeners = new Set<() => void>();
+
+/**
+ * Delays the probe until the returned release function is called, so it measures
+ * real rendering rather than a page still loading its 3D assets. Release is idempotent.
+ */
+export function holdPerfProbe(): () => void {
+  holds += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    holds -= 1;
+    if (holds === 0 && wanted) start();
+  };
+}
 
 function set(next: PerfTier) {
   tier = next;
@@ -29,6 +47,11 @@ function set(next: PerfTier) {
 
 function start() {
   if (started || typeof window === "undefined") return;
+  if (holds > 0) {
+    wanted = true;
+    document.documentElement.dataset.perf = "pending";
+    return;
+  }
   started = true;
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
     set("low");

@@ -1,30 +1,36 @@
 "use client";
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Component, useEffect, useRef, useState, type ReactNode } from "react";
+import { Component, memo, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import * as THREE from "three";
 import { IDLE_FPS, TIER_BUDGETS, type QualityTier } from "./chamber-config";
-import { WasherScene, type ChamberSceneProps, type StageMode } from "./washer-scene";
+import { CAMERA_FOV, WasherScene, type ChamberSceneProps, type StageMode } from "./washer-scene";
 
 /**
  * Client-only R3F canvas for the laundromat washer (loaded with next/dynamic, ssr: false).
  * Rendering policy:
- *   run / drag        → every frame
- *   idle / ready      → IDLE_FPS (static single frame with reduced motion)
- *   finished          → a short settle, then no rendering until something changes
- *   off-screen/hidden → nothing
+ *   run / drag              → every frame
+ *   idle / ready, motion on → every frame (vsync-paced; a timer-driven low rate reads as stutter,
+ *                             most visibly in the pointer parallax)
+ *   idle / ready, motion off→ a short settle, then a static frame (slow devices, reduced motion)
+ *   finished                → a short settle, then no rendering until something changes
+ *   off-screen/hidden       → nothing
  */
 
 export interface ChamberCanvasProps extends ChamberSceneProps {
   reduced: boolean;
   /** Idle/ready gentle motion; off on slow devices (a static frame instead). */
   idleMotion: boolean;
+  /** Fast device: reflections, shadows and the richer room shader. */
+  rich: boolean;
+  /** The two neighbouring machines. */
+  neighbours: boolean;
   onFailure: () => void;
   /** Fires once, after the scene has drawn its first frame (the preloader can go). */
   onReady?: () => void;
 }
 
-export default function ChamberCanvas({ mode, run, subject, tier, reduced, idleMotion, onFailure, onReady }: ChamberCanvasProps) {
+function ChamberCanvas({ mode, run, garments, tier, reduced, idleMotion: idleMotionAllowed, rich, neighbours, onFailure, onReady }: ChamberCanvasProps) {
   const host = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(true);
 
@@ -36,7 +42,8 @@ export default function ChamberCanvas({ mode, run, subject, tier, reduced, idleM
     return () => io.disconnect();
   }, []);
 
-  const continuous = mode === "run" || mode === "drag";
+  const idleMotion = idleMotionAllowed && !reduced && (mode === "idle" || mode === "ready");
+  const continuous = mode === "run" || mode === "drag" || idleMotion;
   const frameloop = !visible ? "never" : continuous ? "always" : "demand";
 
   return (
@@ -45,8 +52,8 @@ export default function ChamberCanvas({ mode, run, subject, tier, reduced, idleM
         <Canvas
           frameloop={frameloop}
           dpr={[1, TIER_BUDGETS[tier].maxDpr]}
-          shadows={tier === "full" && idleMotion}
-          camera={{ fov: 35, near: 0.1, far: 40, position: [0, 1.6, 6.6] }}
+          shadows={tier === "full" && rich}
+          camera={{ fov: CAMERA_FOV, near: 0.1, far: 40, position: [0, 1.6, 6.6] }}
           gl={{ antialias: true, powerPreference: "high-performance" }}
           onCreated={({ gl }) => {
             gl.toneMapping = THREE.ACESFilmicToneMapping;
@@ -59,32 +66,45 @@ export default function ChamberCanvas({ mode, run, subject, tier, reduced, idleM
           tabIndex={-1}
           style={{ pointerEvents: "none" }}
         >
-          <WasherScene mode={mode} run={run} subject={subject} tier={tier} rich={idleMotion} />
-          <Ticker mode={mode} reduced={reduced || !idleMotion} visible={visible} />
-          {onReady && <FirstFrame onReady={onReady} />}
+          {/* The washer model streams in; the stage preloader stays up until its first frame. */}
+          <Suspense fallback={null}>
+            <WasherScene mode={mode} run={run} garments={garments} tier={tier} rich={rich} neighbours={neighbours} />
+            {onReady && <FirstFrame onReady={onReady} />}
+          </Suspense>
+          <Ticker mode={mode} continuous={continuous} visible={visible} />
         </Canvas>
       </CanvasErrorBoundary>
     </div>
   );
 }
 
-/** Drives "demand" frames: low-rate idle motion, a short settle after changes. */
-function Ticker({ mode, reduced, visible }: { mode: StageMode; reduced: boolean; visible: boolean }) {
+/**
+ * On "demand" stages, renders a short settle after each change so damped values
+ * (drag release, standby lighting, the door spring) come to rest, then stops.
+ * Frames are requested from requestAnimationFrame so they stay vsync-aligned.
+ */
+function Ticker({ mode, continuous, visible }: { mode: StageMode; continuous: boolean; visible: boolean }) {
   const invalidate = useThree((s) => s.invalidate);
   useEffect(() => {
-    if (!visible || mode === "run" || mode === "drag") return;
-    // Always render a few frames so damped values (drag release, standby lighting) settle.
-    const settleUntil = performance.now() + 1200;
-    const idleMotion = !reduced && (mode === "idle" || mode === "ready");
-    const timer = setInterval(() => {
-      if (idleMotion || performance.now() < settleUntil) invalidate();
-      else clearInterval(timer);
-    }, 1000 / IDLE_FPS);
+    if (!visible || continuous) return;
+    const settleUntil = performance.now() + SETTLE_MS;
+    let last = 0;
+    let frame = requestAnimationFrame(function tick(now) {
+      if (now >= settleUntil) return;
+      // The settle doesn't need the display's full rate: IDLE_FPS is plenty for damping to finish.
+      if (now - last >= 1000 / IDLE_FPS) {
+        last = now;
+        invalidate();
+      }
+      frame = requestAnimationFrame(tick);
+    });
     invalidate();
-    return () => clearInterval(timer);
-  }, [mode, reduced, visible, invalidate]);
+    return () => cancelAnimationFrame(frame);
+  }, [mode, continuous, visible, invalidate]);
   return null;
 }
+
+const SETTLE_MS = 1200;
 
 /** Reports the first rendered frame: by then the chunk, shaders and textures are all in. */
 function FirstFrame({ onReady }: { onReady: () => void }) {
@@ -110,5 +130,7 @@ class CanvasErrorBoundary extends Component<{ onError: () => void; children: Rea
     return this.state.failed ? null : this.props.children;
   }
 }
+
+export default memo(ChamberCanvas);
 
 export type { QualityTier };

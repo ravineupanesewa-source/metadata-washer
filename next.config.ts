@@ -8,11 +8,14 @@ const isDev = process.env.NODE_ENV !== "production";
  */
 const contentSecurityPolicy = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+  // 'wasm-unsafe-eval' lets three.js's meshopt decoder compile its WebAssembly (not JS eval).
+  `script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'${isDev ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' blob: data:",
   "font-src 'self'",
-  "connect-src 'self'",
+  // blob: lets three.js's GLTFLoader fetch the washer model's embedded textures, which it
+  // unpacks into page-created blob: URLs. No other origin is reachable.
+  "connect-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -48,7 +51,15 @@ const nextConfig: NextConfig = {
           { key: "X-Frame-Options", value: "DENY" },
           { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), interest-cohort=()" },
           { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+          // HTTPS-only once deployed; never sent by `next dev` so localhost isn't pinned.
+          ...(isDev ? [] : [{ key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" }]),
         ],
+      },
+      {
+        // The washer model is ~3 MB and its URL isn't content-hashed: cache it for a week and
+        // revalidate in the background, so repeat visits skip the download without pinning a stale copy.
+        source: "/models/:path*",
+        headers: [{ key: "Cache-Control", value: "public, max-age=604800, stale-while-revalidate=86400" }],
       },
       {
         source: "/api/:path*",

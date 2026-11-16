@@ -1,21 +1,21 @@
 /** Art direction and budgets for the decontamination chamber. */
 
 export const PALETTE = {
-  /* Graphite interior with ember-orange light; cyan marks "verified clean". */
+  /* Graphite interior with soft lavender light; cyan marks "verified clean". */
   stage: "#0A0B0E",
   stageDeep: "#050608",
   /** Working accent (LEDs, face screen, pegs, strips). */
-  accent: "#FF7A1A",
+  accent: "#9D8CFF",
   blue: "#5CA8FF",
   /** Verified-clean accent. */
   mint: "#5CE1E6",
   mintSoft: "#9BEFF2",
-  teal: "#B5530F",
-  muted: "#8F8A86",
+  teal: "#4B3CB0",
+  muted: "#8C899C",
   fault: "#FF5C6C",
   metal: "#16181D",
   metalLight: "#2A2E36",
-  glass: "#FFD2A8",
+  glass: "#DCD4FF",
 } as const;
 
 /** Chamber geometry in world units (photo plane sits near the origin). */
@@ -62,5 +62,11 @@ export function pickTier(reduced: boolean, canvasWidth: number): QualityTier {
 /** Longest texture edge uploaded to the GPU. */
 export const MAX_TEXTURE_SIZE = 1024;
 
-/** Idle/ready scenes redraw at this rate; full rate only while something is happening. */
+/** Rate of the short settle rendered on demand-driven (static) stages after a change. */
 export const IDLE_FPS = 24;
+
+/**
+ * The washer model (optimised copy of the source model). Shared with the page so the
+ * server can emit a preload hint: the download then overlaps the three.js chunk.
+ */
+export const WASHER_MODEL_URL = "/models/washer.glb";

@@ -6,3 +6,7 @@ playwright-report
 *.log
 .env*
 !.env.example
+assets/source
+tsconfig.tsbuildinfo
+coverage
+blob-report

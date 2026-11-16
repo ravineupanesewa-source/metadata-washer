@@ -11,6 +11,9 @@ import { formatBytes, formatDimensions } from "../utils/format";
 import { InspectDialog } from "./inspect-dialog";
 import { ReportDialog } from "./report-dialog";
 import { StatusBadge } from "./status-badge";
+import { impactOf } from "@/features/support/support-impact";
+import { requestSupport } from "@/features/support/support-store";
+import { playSound } from "@/lib/audio/sound-engine";
 
 interface FileRowProps {
   item: QueueItem;
@@ -84,7 +87,11 @@ export function FileRow({ item, index, engine, busy, onRemove, onRetry, onDimens
       <div className="flex shrink-0 flex-col items-end gap-1 @md:flex-row @md:items-center">
         {item.output && (
           <Button asChild size="sm" variant="outline">
-            <a href={item.output.url} download={item.output.filename} aria-label={copy.queue.download(item.name)}>
+            <a href={item.output.url} download={item.output.filename} aria-label={copy.queue.download(item.name)} onClick={() => {
+                playSound("download");
+                requestSupport(impactOf([item]));
+              }}
+            >
               <Download aria-hidden />
               <span className="hidden @md:inline">Download</span>
             </a>

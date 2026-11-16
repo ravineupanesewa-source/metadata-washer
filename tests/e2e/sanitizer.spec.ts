@@ -14,6 +14,10 @@ const start = (page: Page) => page.getByRole("button", { name: "Remove metadata"
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
+  // Let the one-off frame-rate probe finish first (as animation.spec does): it renders the
+  // scene at full rate for a few seconds, which under CPU-rendered WebGL in CI competes with
+  // the server for the same cores. These are functional tests, not timing tests.
+  await expect(page.locator("html")).toHaveAttribute("data-perf", /high|low/, { timeout: 15_000 });
 });
 
 test("uploads, cleans and downloads a supported image @mobile", async ({ page }) => {

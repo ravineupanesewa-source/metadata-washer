@@ -94,6 +94,94 @@
     from { opacity: 0; transform: translateY(12px); }
     to { opacity: 1; transform: translateY(0); }
   }
+  /* Before/after showcase. Transform and opacity only, so they stay on the compositor. */
+  --animate-ba-drift: ba-drift 7s ease-in-out infinite;
+  --animate-ba-ping: ba-ping 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  --animate-ba-scan: ba-scan 3.6s linear infinite;
+  --animate-ba-sheen: ba-sheen 1.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-ba-strike: ba-strike 0.55s cubic-bezier(0.65, 0, 0.35, 1) both;
+  @keyframes ba-drift {
+    0%, 100% { transform: translate(0, 0) rotate(var(--ba-tilt, 0deg)); }
+    50% { transform: translate(var(--ba-dx, 4px), var(--ba-dy, -8px)) rotate(var(--ba-tilt, 0deg)); }
+  }
+  @keyframes ba-ping {
+    0% { transform: scale(0.6); opacity: 0.9; }
+    100% { transform: scale(2.8); opacity: 0; }
+  }
+  @keyframes ba-scan {
+    from { transform: translateY(-100%); }
+    to { transform: translateY(100%); }
+  }
+  @keyframes ba-sheen {
+    from { transform: translateX(-120%) skewX(-18deg); opacity: 0; }
+    30% { opacity: 1; }
+    to { transform: translateX(220%) skewX(-18deg); opacity: 0; }
+  }
+  /* Support modal: confetti burst on "I've sent it". */
+  --animate-confetti: confetti 1.4s cubic-bezier(0.15, 0.6, 0.35, 1) both;
+  @keyframes confetti {
+    from { transform: translate(0, 0) rotate(0deg) scale(0.6); opacity: 1; }
+    80% { opacity: 1; }
+    to { transform: translate(var(--cx, 0), var(--cy, 120px)) rotate(var(--cr, 360deg)) scale(1); opacity: 0; }
+  }
+  /* Stage preloader: the metadata wash cycle. Transform and opacity only. */
+  --animate-wash-tumble: wash-tumble 3.2s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+  --animate-wash-dial: wash-spin 24s linear infinite reverse;
+  --animate-wash-counter: wash-spin 2.6s linear infinite reverse;
+  --animate-wash-tag: wash-tag 3.6s ease-in-out infinite;
+  --animate-wash-wave: wash-wave 3s linear infinite;
+  --animate-wash-slosh: wash-slosh 3.2s ease-in-out infinite;
+  --animate-wash-glow: wash-glow 3.2s ease-in-out infinite;
+  --animate-wash-twinkle: wash-twinkle 2.8s ease-in-out infinite;
+  --animate-wash-sheen: wash-sheen 4s ease-in-out infinite;
+  --animate-wash-word: wash-word 8s ease-in-out infinite;
+  --animate-wash-bar: wash-bar 1.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  @keyframes wash-spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes wash-tumble {
+    0% { transform: rotate(0deg); }
+    45% { transform: rotate(230deg); }
+    58% { transform: rotate(196deg); }
+    100% { transform: rotate(360deg); }
+  }
+  @keyframes wash-tag {
+    0% { opacity: 0; transform: scale(0.4); }
+    14%, 52% { opacity: 1; transform: scale(1); }
+    72%, 100% { opacity: 0; transform: scale(0.2) rotate(40deg); }
+  }
+  @keyframes wash-wave {
+    to { transform: translateX(-50%); }
+  }
+  @keyframes wash-slosh {
+    0%, 100% { transform: rotate(-7deg); }
+    50% { transform: rotate(7deg); }
+  }
+  @keyframes wash-glow {
+    0%, 100% { opacity: 0.45; transform: scale(0.94); }
+    50% { opacity: 0.9; transform: scale(1.06); }
+  }
+  @keyframes wash-twinkle {
+    0%, 100% { opacity: 0; transform: scale(0.3) rotate(0deg); }
+    50% { opacity: 1; transform: scale(1) rotate(90deg); }
+  }
+  @keyframes wash-sheen {
+    0%, 55% { transform: translateX(0) skewX(-20deg); }
+    100% { transform: translateX(600%) skewX(-20deg); }
+  }
+  @keyframes wash-word {
+    0% { opacity: 0; transform: translateY(70%); }
+    3%, 23% { opacity: 1; transform: translateY(0); }
+    26%, 100% { opacity: 0; transform: translateY(-70%); }
+  }
+  @keyframes wash-bar {
+    from { transform: translateX(-110%); }
+    to { transform: translateX(330%); }
+  }
+  @keyframes ba-strike {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+  }
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -135,15 +223,15 @@
   --mint-surface: #f1faf7;
   /* Always-dark showcase surfaces (stage, chamber): graphite with an ember-orange accent, cyan for "verified clean". */
   --night: #07080b;
-  --ember: #ff7a1a;
-  --ember-foreground: #1a0b00;
+  --ember: #9d8cff;
+  --ember-foreground: #120a2e;
   --stage: #0a0b0e;
   --stage-raised: #15171c;
   --stage-deep: #050608;
-  --stage-accent: #ff7a1a;
+  --stage-accent: #9d8cff;
   --stage-blue: #5ca8ff;
   --stage-clean: #5ce1e6;
-  --stage-muted: #8f8a86;
+  --stage-muted: #8c899c;
   --stage-fault: #ff5c6c;
   --brand: #087f6b;
   --brand-foreground: #ffffff;
@@ -163,47 +251,48 @@
 }
 
 .dark {
-  /* Graphite & ember: the CleanFrame look (the app is dark-only). */
+  /* Graphite & lavender: the CleanFrame look (the app is dark-only). Lavender is the
+     "fresh laundry" accent; cyan stays reserved for "verified clean", red for faults. */
   --background: #08090c;
-  --foreground: #f4efe9;
+  --foreground: #f2f0f8;
   --card: #101217;
-  --card-foreground: #f4efe9;
+  --card-foreground: #f2f0f8;
   --popover: #101217;
-  --popover-foreground: #f4efe9;
-  --primary: #ff7a1a;
-  --primary-foreground: #1a0b00;
+  --popover-foreground: #f2f0f8;
+  --primary: #9d8cff;
+  --primary-foreground: #120a2e;
   --secondary: #171a20;
-  --secondary-foreground: #f4efe9;
+  --secondary-foreground: #f2f0f8;
   --muted: #171a20;
-  --muted-foreground: #a8a29c;
-  --accent: #251b15;
-  --accent-foreground: #ffe2cc;
+  --muted-foreground: #a6a3b5;
+  --accent: #1d1930;
+  --accent-foreground: #e6e0ff;
   --destructive: #ff5c6c;
-  --brand: #ff7a1a;
-  --brand-foreground: #1a0b00;
-  --mint: #7a3a12;
-  --mint-bright: #ff9a3c;
-  --mint-surface: #16110e;
+  --brand: #9d8cff;
+  --brand-foreground: #120a2e;
+  --mint: #3d2f86;
+  --mint-bright: #b9a8ff;
+  --mint-surface: #110f1c;
   --success: #5ce1e6;
   --success-foreground: #021316;
   --warning: #ffc24b;
   --warning-foreground: #2a1d03;
   --border: rgb(255 255 255 / 9%);
   --input: rgb(255 255 255 / 14%);
-  --ring: #ff7a1a;
-  --chart-1: #ff7a1a;
+  --ring: #9d8cff;
+  --chart-1: #9d8cff;
   --chart-2: #5ce1e6;
-  --chart-3: #ffb347;
+  --chart-3: #ff8ad8;
   --chart-4: #ff5c6c;
-  --chart-5: #8c7cff;
+  --chart-5: #5ca8ff;
   --sidebar: #101217;
-  --sidebar-foreground: #f4efe9;
-  --sidebar-primary: #ff7a1a;
-  --sidebar-primary-foreground: #1a0b00;
-  --sidebar-accent: #251b15;
-  --sidebar-accent-foreground: #ffe2cc;
+  --sidebar-foreground: #f2f0f8;
+  --sidebar-primary: #9d8cff;
+  --sidebar-primary-foreground: #120a2e;
+  --sidebar-accent: #1d1930;
+  --sidebar-accent-foreground: #e6e0ff;
   --sidebar-border: rgb(255 255 255 / 9%);
-  --sidebar-ring: #ff7a1a;
+  --sidebar-ring: #9d8cff;
 }
 
 @layer base {
@@ -215,6 +304,19 @@
   }
   html {
     @apply font-sans;
+    /* Keep the dark stage behind iOS rubber-band overscroll instead of a white flash. */
+    background-color: var(--stage);
+    /* Don't let phones inflate text sizes in landscape. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  /* Controls have their own pressed and focus styles: drop the grey mobile tap flash. */
+  a,
+  button,
+  summary,
+  label,
+  [role="button"] {
+    -webkit-tap-highlight-color: transparent;
   }
   /* Display face for headings: wide, squared Orbitron with a little tracking. */
   h1,
@@ -257,7 +359,7 @@
   /* Mint → deep teal; the light end still meets 3:1 for large display text. */
   background-image: linear-gradient(100deg, #1fa88a, var(--brand) 70%);
   .dark & {
-    background-image: linear-gradient(100deg, #ffd0a1, var(--ember) 60%);
+    background-image: linear-gradient(100deg, #e4dcff, var(--ember) 60%);
   }
   background-clip: text;
   -webkit-background-clip: text;
@@ -278,4 +380,9 @@
   box-shadow:
     0 0 0 1px color-mix(in oklch, var(--brand) 55%, transparent),
     0 12px 40px -10px color-mix(in oklch, var(--brand) 55%, transparent);
+}
+
+/* Before/after showcase: loops pause while it is off-screen. */
+[data-ba-active="false"] * {
+  animation-play-state: paused !important;
 }

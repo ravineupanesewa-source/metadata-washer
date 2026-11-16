@@ -10,15 +10,24 @@ import type { PublicLimits } from "@/lib/config/limits";
 import { FORMAT_CAPABILITIES } from "@/lib/image/capabilities";
 import type { ProcessingOptions } from "@/lib/image/types";
 import { ChamberStage, type StageSubject } from "../decontamination/chamber-stage";
+import type { ChamberSubject } from "../decontamination/washer-scene";
 import { isFinished } from "../decontamination/timeline";
 import { createHttpEngine } from "../engine/http-engine";
 import type { SanitizerEngine } from "../engine/types";
 import { useDecontamination } from "../hooks/use-decontamination";
 import { useIntake } from "../intake";
 import { useSanitizerQueue } from "../hooks/use-sanitizer-queue";
-import { copy } from "../strings";
+import { copy, sound } from "../strings";
 import type { QueueItem } from "../types/queue";
 import { useReducedMotion } from "../visuals/use-reduced-motion";
+import { BeforeAfter, BEFORE_AFTER_ID } from "./before-after";
+import { showcaseItems } from "./before-after-model";
+import { SupportModal } from "@/features/support/support-modal";
+import { SoundToggle } from "@/lib/audio/sound-toggle";
+import { useSoundCues } from "@/lib/audio/use-sound-cues";
+import { playSound, setMusicEnabled, useMusicEnabled } from "@/lib/audio/sound-engine";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { FileRow } from "./file-row";
 import { ProcessingSettings } from "./processing-settings";
 import { ResultPanel } from "./result-panel";
@@ -65,6 +74,30 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
         : null;
   const stageMode = running ? "run" : decon.state.status === "finished" ? "finished" : subject ? "ready" : "idle";
 
+  // Sound follows the same state the washer animates from.
+  useSoundCues({
+    mode: stageMode,
+    phase: decon.state.status === "idle" ? null : decon.view.phase,
+    outcome: decon.state.status === "idle" ? null : decon.view.outcome,
+    items: queue.items.length,
+  });
+
+  // Every photo the washer shows: the run's files (each with its own result) or the whole ready batch.
+  const garmentItems = decon.state.status !== "idle" ? runItems : queue.items.filter((i) => i.status === "ready");
+  const garmentSignature = garmentItems.map((i) => `${i.id}:${i.status === "failed" || i.status === "cancelled" ? 1 : 0}`).join(",");
+  const garments = useMemo<ChamberSubject[]>(
+    () =>
+      garmentItems.map((i) => ({
+        key: i.id,
+        file: i.file,
+        label: i.format ? FORMAT_CAPABILITIES[i.format].label : "Image",
+        failed: i.status === "failed" || i.status === "cancelled",
+      })),
+    // The signature captures everything the scene uses; item objects change on every status tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [garmentSignature],
+  );
+
   async function handleFiles(files: File[]) {
     // New files start a new session: the chamber leaves its finished pose and the old
     // result panel goes away (earlier downloads stay available in the queue rows).
@@ -73,6 +106,7 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
       setRunIds(new Set());
     }
     const { added, rejected } = await queue.addFiles(files);
+    if (rejected) playSound("reject");
     setAnnouncement([added && copy.live.added(added), rejected && copy.live.rejected(rejected)].filter(Boolean).join(" "));
   }
 
@@ -99,6 +133,7 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
   }
 
   function handleClear() {
+    playSound("clear");
     queue.clear();
     decon.reset();
     setRunIds(new Set());
@@ -110,6 +145,7 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
       ? copy.live.finished(copy.summary.counts(queue.summary.success, queue.summary.partial, queue.summary.failed))
       : "";
   const showResults = revealing && runItems.length > 0 && runItems.every(isFinished);
+  const showComparison = showResults && showcaseItems(runItems).length > 0;
   const runSummary = useMemo(() => {
     const count = (...statuses: QueueItem["status"][]) => runItems.filter((i) => statuses.includes(i.status)).length;
     const success = count("success");
@@ -118,7 +154,8 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
     return { total: runItems.length, valid: runItems.length, ready: 0, active: 0, success, partial, failed, finished: true };
   }, [runItems]);
 
-  const panel = "rounded-3xl bg-stage-raised/85 p-4 ring-1 ring-ember/20 backdrop-blur-xl";
+  // No backdrop blur: on wide screens this panel floats over the live canvas (see ChamberStage's dock).
+  const panel = "rounded-3xl bg-stage-raised/95 p-4 ring-1 ring-ember/20";
 
   return (
     <>
@@ -128,6 +165,7 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
         run={decon.state.status === "idle" ? null : decon.state.run}
         view={decon.view}
         subject={subject}
+        garments={garments}
         reduced={reducedMotion}
         readyCount={queue.summary.ready}
         modeLabel={copy.settings.modes[options.mode].title.replace(" (recommended)", "")}
@@ -137,10 +175,14 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
         onFiles={handleFiles}
         onStart={handleStart}
         onCancel={handleCancel}
-        onShowResults={decon.finish}
+        onShowResults={() => {
+          playSound("reveal");
+          decon.finish();
+        }}
         hasItems={queue.items.length > 0}
         tools={
           <>
+            <SoundToggle />
             <SettingsDialog value={options} onChange={setOptions} disabled={busy} />
             <PrivacyDialog iconOnly />
           </>
@@ -153,6 +195,7 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
             focusOnMount
             onRetryFailed={() => beginRun(queue.retryFailed(options))}
             onReset={handleClear}
+            onCompare={showComparison ? () => scrollToComparison(reducedMotion) : undefined}
           />
         )}
 
@@ -177,7 +220,10 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
                   item={item}
                   engine={engine}
                   busy={busy}
-                  onRemove={queue.remove}
+                  onRemove={(id) => {
+                    playSound("remove");
+                    queue.remove(id);
+                  }}
                   onRetry={(id) => {
                     queue.retry(id, options);
                     beginRun([id]);
@@ -190,11 +236,23 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
         )}
       </ChamberStage>
 
+      {showComparison && <BeforeAfter items={runItems} />}
+      {/* Optional eSewa support: opens shortly after a download, never instead of it. */}
+      <SupportModal />
+
       <div role="status" aria-live="polite" className="sr-only" data-testid="live-region">
         {finishedMessage || announcement}
       </div>
     </>
   );
+}
+
+/** Brings the before/after section into view and moves focus to its heading. */
+function scrollToComparison(reduced: boolean) {
+  const section = document.getElementById(BEFORE_AFTER_ID);
+  if (!section) return;
+  section.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+  section.querySelector<HTMLElement>("h2")?.focus({ preventScroll: true });
 }
 
 /** Removal mode lives behind one icon in the dock. */
@@ -212,7 +270,23 @@ function SettingsDialog({ value, onChange, disabled }: { value: ProcessingOption
           <DialogDescription>{copy.settings.modes[value.mode].title}</DialogDescription>
         </DialogHeader>
         <ProcessingSettings value={value} onChange={onChange} disabled={disabled} />
+        <MusicSetting />
       </DialogContent>
     </Dialog>
+  );
+}
+
+function MusicSetting() {
+  const on = useMusicEnabled();
+  return (
+    <div className="flex items-start justify-between gap-4 border-t pt-4">
+      <div className="space-y-1">
+        <Label htmlFor="music-switch">{sound.music.title}</Label>
+        <p id="music-hint" className="text-xs text-muted-foreground">
+          {sound.music.description}
+        </p>
+      </div>
+      <Switch id="music-switch" checked={on} onCheckedChange={setMusicEnabled} aria-describedby="music-hint" data-testid="music-switch" />
+    </div>
   );
 }

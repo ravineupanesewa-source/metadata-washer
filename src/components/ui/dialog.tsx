@@ -6,6 +6,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
+import { playSound } from "@/lib/audio/sound-engine"
 
 function Dialog({
   ...props
@@ -47,6 +48,15 @@ function DialogOverlay({
   )
 }
 
+/** Mounted with the open dialog's content: a swoosh in on open, out once it has closed. */
+function DialogSound() {
+  React.useEffect(() => {
+    playSound("dialogOpen")
+    return () => playSound("dialogClose")
+  }, [])
+  return null
+}
+
 function DialogContent({
   className,
   children,
@@ -66,6 +76,7 @@ function DialogContent({
         )}
         {...props}
       >
+        <DialogSound />
         {children}
         {showCloseButton && (
           <DialogPrimitive.Close data-slot="dialog-close" asChild>
