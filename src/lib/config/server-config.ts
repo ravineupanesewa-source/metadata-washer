@@ -5,9 +5,11 @@ import { z } from "zod";
 import type { PublicLimits } from "./limits";
 
 const MB = 1024 * 1024;
+/** Vercel rejects request bodies over 4.5 MB, so default below that when running there. */
+const DEFAULT_MAX_FILE_SIZE_MB = process.env.VERCEL ? 4 : 25;
 
 export const serverConfigSchema = z.object({
-  CLEANFRAME_MAX_FILE_SIZE_MB: z.coerce.number().positive().max(512).default(25),
+  CLEANFRAME_MAX_FILE_SIZE_MB: z.coerce.number().positive().max(512).default(DEFAULT_MAX_FILE_SIZE_MB),
   CLEANFRAME_MAX_FILES_PER_BATCH: z.coerce.number().int().min(1).max(200).default(20),
   CLEANFRAME_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(2),
   CLEANFRAME_MAX_QUEUED_REQUESTS: z.coerce.number().int().min(0).max(1000).default(20),

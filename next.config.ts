@@ -30,7 +30,8 @@ const nextConfig: NextConfig = {
   // Spawns Perl/ExifTool and native libvips; must run as plain Node modules.
   serverExternalPackages: ["exiftool-vendored", "exiftool-vendored.pl", "sharp"],
   outputFileTracingIncludes: {
-    "/api/**": ["./node_modules/exiftool-vendored.pl/**/*"],
+    // vendor/perl exists only after `npm run vercel-build` (portable Perl for serverless hosts).
+    "/api/**": ["./node_modules/exiftool-vendored.pl/**/*", "./vendor/perl/**/*"],
   },
   turbopack: {
     rules: {

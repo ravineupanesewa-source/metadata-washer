@@ -1,7 +1,37 @@
 import "server-only";
-import { ExifTool, ExifToolTask } from "exiftool-vendored";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { ExifTool, ExifToolTask, exiftoolPath } from "exiftool-vendored";
 import { getServerConfig } from "../config/server-config";
 import { parseExifToolJson, type ClassifiedTag } from "./classify";
+
+/**
+ * Serverless runtimes (Vercel) have no /usr/bin/perl. `npm run vercel-build` bundles a
+ * portable Perl into vendor/perl (scripts/vendor-perl.mjs); use it when the system has none.
+ */
+function bundledPerl(): string | null {
+  if (existsSync("/usr/bin/perl")) return null;
+  const candidate = path.join(process.cwd(), "vendor", "perl", "bin", "perl");
+  return existsSync(candidate) ? candidate : null;
+}
+
+function perlOptions() {
+  const perl = bundledPerl();
+  if (!perl) return {};
+  return {
+    checkPerl: false,
+    ignoreShebang: true,
+    processFactory: async () =>
+      spawn(perl, [await exiftoolPath()], {
+        stdio: "pipe" as const,
+        shell: false,
+        windowsHide: true,
+        detached: false,
+        env: { NODE_ENV: process.env.NODE_ENV, LANG: "C" },
+      }),
+  };
+}
 
 /**
  * Thin wrapper around a long-lived ExifTool process pool (`-stay_open`).
@@ -22,6 +52,7 @@ export function getExifTool(): ExifTool {
       taskRetries: 0,
       // Our own args decide what is read; no geolocation lookups or timezone inference.
       geolocation: false,
+      ...perlOptions(),
     });
   }
   return g[globalKey];
