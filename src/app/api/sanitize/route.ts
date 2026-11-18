@@ -7,6 +7,7 @@ import { readLimitedBody } from "@/lib/server/body";
 import {
   PRIVATE_HEADERS,
   assertBinaryRequest,
+  encodeFindingsHeader,
   encodeReportHeader,
   errorResponse,
   getProcessingSemaphore,
@@ -17,7 +18,9 @@ import {
  * POST /api/sanitize?mode=privacy|strict&orientation=preserve-tag|lossless-or-fail|allow-reencode
  * Body: the raw image bytes (application/octet-stream).
  *
- * 200 → sanitized bytes; report in the `X-CleanFrame-Report` header (base64url JSON).
+ * 200 → sanitized bytes; report in the `X-CleanFrame-Report` header (base64url JSON) and,
+ *       when the original revealed anything, value highlights in `X-CleanFrame-Findings`
+ *       (base64url JSON, same no-store response; never logged or persisted).
  * 422 → { error, report } when verification failed; no file is returned.
  */
 export async function POST(request: Request): Promise<Response> {
@@ -41,6 +44,7 @@ export async function POST(request: Request): Promise<Response> {
       return errorResponse(new AppError("VERIFICATION_FAILED"), { report: outcome.report });
     }
 
+    const findings = encodeFindingsHeader(outcome.findings);
     return new Response(new Uint8Array(outcome.output), {
       status: 200,
       headers: {
@@ -49,6 +53,7 @@ export async function POST(request: Request): Promise<Response> {
         "Content-Length": String(outcome.output.byteLength),
         "Content-Disposition": contentDisposition(sanitizedFilename("image", outcome.format)),
         "X-CleanFrame-Report": encodeReportHeader(outcome.report),
+        ...(findings ? { "X-CleanFrame-Findings": findings } : {}),
       },
     });
   } catch (error) {

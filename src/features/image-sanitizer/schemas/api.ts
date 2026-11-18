@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  FINDING_KINDS,
   IMAGE_FORMATS,
   METADATA_CATEGORIES,
   METADATA_MODES,
@@ -92,5 +93,24 @@ export const inspectionResultSchema = z.object({
   tags: z.array(z.object({ group: z.string(), name: z.string(), category, value: z.string().optional() })),
 });
 
+const fate = z.enum(["removed", "kept", "still-present"]);
+
+/** Validates the findings header (crosses a trust boundary; values are plain text only). */
+export const metadataFindingsSchema = z.object({
+  version: z.literal(1),
+  gps: z
+    .object({
+      latitude: z.number().min(-90).max(90),
+      longitude: z.number().min(-180).max(180),
+      altitude: z.number().finite().nullable(),
+      fate,
+    })
+    .nullable(),
+  items: z
+    .array(z.object({ kind: z.enum(FINDING_KINDS), category, value: z.string().max(200), fate }))
+    .max(FINDING_KINDS.length),
+});
+
 export const REPORT_HEADER = "x-cleanframe-report";
+export const FINDINGS_HEADER = "x-cleanframe-findings";
 

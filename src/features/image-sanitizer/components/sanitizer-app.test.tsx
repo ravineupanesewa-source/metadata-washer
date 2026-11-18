@@ -40,7 +40,16 @@ const stage = () => screen.getByTestId("chamber-stage");
 describe("SanitizerApp", () => {
   it("validates by content, loads the chamber, processes only on request, and shows real results", async () => {
     const engine: SanitizerEngine = {
-      sanitize: vi.fn(async () => ({ ok: true as const, report, blob: new Blob(["cleaned-bytes"]) })),
+      sanitize: vi.fn(async () => ({
+        ok: true as const,
+        report,
+        blob: new Blob(["cleaned-bytes"]),
+        findings: {
+          version: 1 as const,
+          gps: { latitude: 27.7172, longitude: 85.324, altitude: null, fate: "removed" as const },
+          items: [{ kind: "place" as const, category: "location" as const, value: "Kathmandu", fate: "removed" as const }],
+        },
+      })),
       inspect: vi.fn(),
     };
     const user = userEvent.setup();
@@ -78,6 +87,12 @@ describe("SanitizerApp", () => {
     expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "Metadata removed" }));
     expect(engine.sanitize).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("live-region")).toHaveTextContent("1 cleaned and verified");
+    // What the original revealed is shown, already washed out (reduced motion in jsdom).
+    const exposurePanel = within(panel).getByTestId("exposure-panel");
+    expect(exposurePanel).toHaveTextContent("Kathmandu");
+    expect(exposurePanel).toHaveTextContent("27.71720° N, 85.32400° E");
+    expect(within(exposurePanel).getAllByTestId("finding").map((f) => f.dataset.state)).toEqual(["washed", "washed"]);
+    expect(screen.getByTestId("live-region")).toHaveTextContent("2 personal details were found and washed out");
   });
 
   it("never shows success when cleaning fails, and retry starts a fresh run", async () => {
@@ -86,7 +101,7 @@ describe("SanitizerApp", () => {
       sanitize: vi.fn(async () =>
         fail
           ? { ok: false as const, error: { code: "BUSY", message: "The server is busy.", retryable: true }, report: null }
-          : { ok: true as const, report, blob: new Blob(["x"]) },
+          : { ok: true as const, report, blob: new Blob(["x"]), findings: null },
       ),
       inspect: vi.fn(),
     };
@@ -116,7 +131,7 @@ describe("SanitizerApp", () => {
   it("reports 'no metadata found' honestly", async () => {
     const empty = { ...report, metadata: { ...report.metadata, before: [], removed: [], noMetadataDetected: true } } satisfies ProcessingReport;
     const engine: SanitizerEngine = {
-      sanitize: vi.fn(async () => ({ ok: true as const, report: empty, blob: new Blob(["x"]) })),
+      sanitize: vi.fn(async () => ({ ok: true as const, report: empty, blob: new Blob(["x"]), findings: null })),
       inspect: vi.fn(),
     };
     const user = userEvent.setup();

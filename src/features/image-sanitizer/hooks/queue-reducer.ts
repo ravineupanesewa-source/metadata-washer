@@ -1,4 +1,4 @@
-import type { ProcessingOptions, ProcessingReport } from "@/lib/image/types";
+import type { MetadataFindings, ProcessingOptions, ProcessingReport } from "@/lib/image/types";
 import type { ItemError, ItemOutput, QueueItem } from "../types/queue";
 
 export type QueueAction =
@@ -8,7 +8,7 @@ export type QueueAction =
   | { type: "clear" }
   | { type: "enqueue"; ids: string[]; options: ProcessingOptions }
   | { type: "start"; id: string }
-  | { type: "succeed"; id: string; report: ProcessingReport; output: ItemOutput }
+  | { type: "succeed"; id: string; report: ProcessingReport; output: ItemOutput; findings?: MetadataFindings | null }
   | { type: "fail"; id: string; error: ItemError; report: ProcessingReport | null }
   | { type: "cancel" };
 
@@ -30,7 +30,7 @@ export function queueReducer(items: QueueItem[], action: QueueAction): QueueItem
       const ids = new Set(action.ids);
       return items.map((item) =>
         ids.has(item.id) && item.status !== "invalid" && item.status !== "processing"
-          ? { ...item, status: "queued", options: action.options, error: null, report: null, output: null }
+          ? { ...item, status: "queued", options: action.options, error: null, report: null, output: null, findings: null }
           : item,
       );
     }
@@ -39,7 +39,7 @@ export function queueReducer(items: QueueItem[], action: QueueAction): QueueItem
     case "succeed":
       return update(items, action.id, (item) =>
         item.status === "processing"
-          ? { status: action.report.status === "success" ? "success" : "partial", report: action.report, output: action.output }
+          ? { status: action.report.status === "success" ? "success" : "partial", report: action.report, output: action.output, findings: action.findings ?? null }
           : {},
       );
     case "fail":

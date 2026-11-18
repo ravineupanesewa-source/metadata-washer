@@ -17,7 +17,7 @@ import type { SanitizerEngine } from "../engine/types";
 import { useDecontamination } from "../hooks/use-decontamination";
 import { useIntake } from "../intake";
 import { useSanitizerQueue } from "../hooks/use-sanitizer-queue";
-import { copy, sound } from "../strings";
+import { copy, exposure, sound } from "../strings";
 import type { QueueItem } from "../types/queue";
 import { useReducedMotion } from "../visuals/use-reduced-motion";
 import { BeforeAfter, BEFORE_AFTER_ID } from "./before-after";
@@ -140,9 +140,15 @@ export function SanitizerApp({ limits, engine: injected }: { limits: PublicLimit
     setAnnouncement(copy.live.cleared);
   }
 
+  const exposedCount = runItems.reduce((n, i) => n + (i.output && i.findings ? i.findings.items.length + (i.findings.gps ? 1 : 0) : 0), 0);
   const finishedMessage =
     queue.summary.finished && revealing
-      ? copy.live.finished(copy.summary.counts(queue.summary.success, queue.summary.partial, queue.summary.failed))
+      ? [
+          copy.live.finished(copy.summary.counts(queue.summary.success, queue.summary.partial, queue.summary.failed)),
+          exposedCount > 0 ? exposure.live(exposedCount) : "",
+        ]
+          .filter(Boolean)
+          .join(" ")
       : "";
   const showResults = revealing && runItems.length > 0 && runItems.every(isFinished);
   const showComparison = showResults && showcaseItems(runItems).length > 0;

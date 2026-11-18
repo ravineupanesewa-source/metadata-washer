@@ -1,5 +1,7 @@
 import type { ErrorCode } from "@/lib/security/errors";
 import type {
+  FindingFate,
+  FindingKind,
   MetadataCategory,
   MetadataMode,
   NoticeCode,
@@ -272,6 +274,77 @@ export const copy = {
     cleared: "Queue cleared.",
   },
 } as const;
+
+export type Sensitivity = "high" | "medium" | "low";
+
+/** The "what your photo was giving away" panel. */
+export const exposure = {
+  title: "What your photo was giving away",
+  subtitle: "Found in the original file before washing. These details are no longer in your download.",
+  subtitleKept: "Found in the original file before washing.",
+  meter: (left: number, total: number) =>
+    left === 0 ? `All ${total} ${total === 1 ? "detail" : "details"} washed out` : `${left} of ${total} still exposed`,
+  meterLabel: "Exposure",
+  hide: "Hide values",
+  show: "Show values",
+  hideHint: "Blur the values, for example while sharing your screen.",
+  replay: "Replay",
+  more: (n: number, categories: string) => `+ ${n} more technical ${n === 1 ? "field" : "fields"} removed: ${categories}.`,
+  noHighlights: "No personal details like location, names or serial numbers were found, only technical fields.",
+  pick: "Show findings for",
+  sensitivity: { high: "High risk", medium: "Medium risk", low: "Low risk" } satisfies Record<Sensitivity, string>,
+  fate: {
+    exposed: "Exposed",
+    removed: "Washed out",
+    kept: "Kept on purpose",
+    "still-present": "Still present",
+  } satisfies Record<FindingFate | "exposed", string>,
+  gps: {
+    label: "Exact location",
+    hint: "GPS coordinates pinpoint where the photo was taken, often to within a few metres.",
+    altitude: (m: string) => `${m} m altitude`,
+    erased: "Location erased",
+    mapLabel: (lat: string, lon: string) => `World grid with a marker at ${lat}, ${lon}`,
+  },
+  live: (n: number) => `${n} personal ${n === 1 ? "detail was" : "details were"} found and washed out of the image.`,
+} as const;
+
+export const FINDING_TEXT: Record<FindingKind, { label: string; hint: string; sensitivity: Sensitivity; format?: (value: string) => string }> = {
+  place: { label: "Place name", hint: "Names the city or area where the photo was taken.", sensitivity: "high" },
+  serial: {
+    label: "Serial number",
+    hint: "Ties every photo from this camera back to one device, and to whoever owns it.",
+    sensitivity: "high",
+  },
+  owner: { label: "Name & copyright", hint: "A person's name, travelling with every copy of the file.", sensitivity: "high" },
+  "unique-id": {
+    label: "Unique image ID",
+    hint: "A fingerprint that can match copies of this file across sites.",
+    sensitivity: "medium",
+  },
+  thumbnail: {
+    label: "Hidden preview image",
+    hint: "A small copy of the original photo, which can survive crops and edits.",
+    sensitivity: "medium",
+    format: (bytes) => {
+      const n = Number(bytes);
+      return n > 0 ? `Embedded copy of the photo (${n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`})` : "Embedded copy of the photo";
+    },
+  },
+  captured: { label: "Date & time taken", hint: "Shows exactly when you were there.", sensitivity: "medium" },
+  device: { label: "Camera or phone", hint: "The exact make and model of your device.", sensitivity: "medium" },
+  description: { label: "Caption or comment", hint: "Text written into the file, often by an app.", sensitivity: "medium" },
+  keywords: { label: "Keywords", hint: "Tags describing who or what is in the photo.", sensitivity: "low" },
+  host: { label: "Computer name", hint: "Can include your computer's or account's name.", sensitivity: "medium" },
+  lens: { label: "Lens", hint: "The lens model used for the shot.", sensitivity: "low" },
+  software: { label: "Software", hint: "Apps used to take, edit or export the photo.", sensitivity: "low" },
+  "edit-history": {
+    label: "Edit history",
+    hint: "A log of editing steps saved by the editing app.",
+    sensitivity: "low",
+    format: (steps) => `${steps} recorded editing ${steps === "1" ? "step" : "steps"}`,
+  },
+};
 
 export const CATEGORY_LABELS: Record<MetadataCategory, string> = {
   location: "Location (GPS)",

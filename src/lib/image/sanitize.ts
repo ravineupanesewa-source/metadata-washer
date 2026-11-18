@@ -5,6 +5,7 @@ import { withWorkspace } from "../files/workspace";
 import { AppError } from "../security/errors";
 import { EXIFTOOL_FILE_TYPES, getCapability } from "./capabilities";
 import { readMetadata, runExifTool, type MetadataSnapshot } from "./exiftool";
+import { extractFindings } from "./findings";
 import { gifRenderHash } from "./gif-hash";
 import { decideOrientation, swapsDimensions } from "./orientation";
 import { buildReport } from "./report";
@@ -12,7 +13,7 @@ import { detectSignature } from "./signature";
 import { buildResidualArgs, buildStripArgs } from "./strip-args";
 import { findJpegtran, jpegtranTransform, reencodeUpright } from "./transform";
 import { allowedCategories, verifyOutput, type FileFacts } from "./verify";
-import type { ImageFormat, OrientationAction, ProcessingOptions, ProcessingReport } from "./types";
+import type { ImageFormat, MetadataFindings, OrientationAction, ProcessingOptions, ProcessingReport } from "./types";
 
 /**
  * The processing pipeline:
@@ -31,6 +32,11 @@ export interface SanitizeOutcome {
   report: ProcessingReport;
   /** Present only when verification did not fail. */
   output: Buffer | null;
+  /**
+   * What the original was revealing, with values. Present only with `output`.
+   * Never log it or fold it into `report`: the report is persisted in ZIPs.
+   */
+  findings: MetadataFindings | null;
 }
 
 /** Size and signature checks shared by every endpoint. Cheap; runs before any disk I/O. */
@@ -157,6 +163,8 @@ export async function sanitizeImage({ bytes, options, signal }: SanitizeRequest)
       verification,
     });
 
-    return { format, report, output: report.status === "failed" ? null : outputBytes };
+    const output = report.status === "failed" ? null : outputBytes;
+    const findings = output && !report.metadata.noMetadataDetected ? extractFindings(before.tags, report) : null;
+    return { format, report, output, findings };
   });
 }

@@ -1,4 +1,4 @@
-import type { ImageFormat, ProcessingOptions, ProcessingReport } from "@/lib/image/types";
+import type { ImageFormat, MetadataFindings, ProcessingOptions, ProcessingReport } from "@/lib/image/types";
 
 export type ItemStatus =
   | "ready"
@@ -38,6 +38,8 @@ export interface QueueItem {
   error: ItemError | null;
   report: ProcessingReport | null;
   output: ItemOutput | null;
+  /** What the original revealed (with values). In memory only: never zipped or stored. */
+  findings: MetadataFindings | null;
 }
 
 export const FINISHED_STATUSES: readonly ItemStatus[] = ["success", "partial", "failed", "cancelled"];

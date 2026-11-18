@@ -31,6 +31,7 @@ async function toQueueItem(file: File, limits: PublicLimits, accepted: boolean):
     error: null,
     report: null,
     output: null,
+    findings: null,
   };
   const reject = (code: keyof typeof ERROR_TEXT) => ({
     ...base,
@@ -166,7 +167,13 @@ export function useSanitizerQueue(engine: SanitizerEngine, limits: PublicLimits)
               URL.revokeObjectURL(url);
               return;
             }
-            dispatch({ type: "succeed", id: item.id, report: result.report, output: { blob: result.blob, url, filename } });
+            dispatch({
+              type: "succeed",
+              id: item.id,
+              report: result.report,
+              output: { blob: result.blob, url, filename },
+              findings: result.findings,
+            });
           } else {
             dispatch({ type: "fail", id: item.id, error: result.error, report: result.report });
           }

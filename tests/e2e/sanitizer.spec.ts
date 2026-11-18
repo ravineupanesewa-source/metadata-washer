@@ -37,6 +37,30 @@ test("uploads, cleans and downloads a supported image @mobile", async ({ page })
   expect(bytes.toString("latin1")).not.toContain("Jane Fixture");
 });
 
+test("shows what the original was giving away, but never puts it in the ZIP report", async ({ page }) => {
+  await addFiles(page, "jpeg-full-orient6.jpg", "jpeg-icc.jpg");
+  await start(page).click();
+  const panel = page.getByTestId("exposure-panel");
+  await expect(panel).toBeVisible({ timeout: 20_000 });
+  await expect(panel).toContainText("Kathmandu");
+  await expect(panel).toContainText("SN-0042-SECRET");
+  await expect(panel).toContainText("27.71720° N, 85.32400° E");
+  // Reduced motion: everything is shown already washed out.
+  await expect(panel.getByTestId("finding").first()).toHaveAttribute("data-state", "washed");
+  await expect(page.getByRole("meter", { name: "Exposure" })).toHaveAttribute("aria-valuenow", "0");
+
+  // The per-file report shows the same findings.
+  await page.getByRole("button", { name: "Show report for jpeg-full-orient6.jpg" }).click();
+  await expect(page.getByRole("dialog").getByTestId("exposure-panel")).toContainText("Jane Fixture");
+  await page.keyboard.press("Escape");
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByTestId("batch-summary").getByRole("button", { name: "Download all (ZIP)" }).click();
+  const zip = await JSZip.loadAsync(await readFile((await (await downloadPromise).path())!));
+  const report = await zip.file("report.json")!.async("string");
+  for (const secret of ["Kathmandu", "SN-0042-SECRET", "Jane Fixture", "27.7172"]) expect(report).not.toContain(secret);
+});
+
 test("does not upload anything until the user starts processing", async ({ page }) => {
   const uploads: string[] = [];
   page.on("request", (r) => r.url().includes("/api/") && uploads.push(r.url()));

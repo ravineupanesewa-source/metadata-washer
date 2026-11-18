@@ -18,6 +18,11 @@ const item = (id: string, status: QueueItem["status"], filename: string): QueueI
   error: null,
   report: { status: status === "failed" ? "failed" : "success" } as ProcessingReport,
   output: status === "failed" ? null : { blob: new Blob([id]), url: "blob:x", filename },
+  findings: {
+    version: 1,
+    gps: { latitude: 27.7172, longitude: 85.324, altitude: null, fate: "removed" },
+    items: [{ kind: "serial", category: "device", value: "SN-0042-SECRET", fate: "removed" }],
+  },
 });
 
 describe("buildResultsZip", () => {
@@ -32,6 +37,9 @@ describe("buildResultsZip", () => {
     expect(names).toEqual(["photo-clean (2).jpg", "photo-clean.jpg", "report.json"]);
     const report = await zip.file("report.json")!.async("string");
     expect(report).not.toContain("secret-name");
+    // Findings carry real values and must never be persisted into the ZIP.
+    expect(report).not.toContain("SN-0042-SECRET");
+    expect(report).not.toContain("27.7172");
     expect(JSON.parse(report).files).toHaveLength(2);
   });
 });

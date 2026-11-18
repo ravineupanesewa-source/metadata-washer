@@ -17,6 +17,7 @@ const item = (id: string, status: QueueItem["status"] = "ready"): QueueItem => (
   error: null,
   report: null,
   output: null,
+  findings: null,
 });
 
 const options = { mode: "privacy", orientationPolicy: "preserve-tag" } as const;

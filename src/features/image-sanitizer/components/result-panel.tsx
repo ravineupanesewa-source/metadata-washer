@@ -6,10 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { QueueSummary } from "../hooks/use-sanitizer-queue";
-import { CATEGORY_LABELS, beforeAfter, copy } from "../strings";
+import { CATEGORY_LABELS, beforeAfter, copy, exposure } from "../strings";
 import type { QueueItem } from "../types/queue";
 import { formatBytes } from "../utils/format";
 import { buildResultsZip, triggerDownload, zipFilename } from "../utils/zip";
+import { ExposurePanel } from "./exposure-panel";
 import { impactOf } from "@/features/support/support-impact";
 import { requestSupport } from "@/features/support/support-store";
 import { playSound } from "@/lib/audio/sound-engine";
@@ -37,6 +38,10 @@ export function ResultPanel({ items, summary, focusOnMount, onRetryFailed, onRes
   const allFailed = downloadable === 0;
   const nothingFound = !allFailed && items.filter((i) => i.report && i.output).every((i) => i.report!.metadata.noMetadataDetected);
   const [previewBroken, setPreviewBroken] = useState(false);
+  // Files whose originals revealed something; the featured one is shown first.
+  const exposed = items.filter((i) => i.findings && i.report && i.output);
+  const [exposedId, setExposedId] = useState<string | null>(null);
+  const shownExposure = exposed.find((i) => i.id === exposedId) ?? exposed.find((i) => i.id === featured?.id) ?? exposed[0];
 
   useEffect(() => {
     if (focusOnMount) heading.current?.focus();
@@ -175,6 +180,31 @@ export function ResultPanel({ items, summary, focusOnMount, onRetryFailed, onRes
           {downloadable > 1 && <p className="text-xs text-muted-foreground">{copy.summary.zipNote}</p>}
         </div>
       </div>
+
+      {shownExposure && (
+        <div className="space-y-3 border-t p-5 @xl:p-6">
+          {exposed.length > 1 && (
+            <div role="group" aria-label={exposure.pick} className="flex gap-1.5 overflow-x-auto pb-1">
+              {exposed.map((item) => (
+                <Button
+                  key={item.id}
+                  type="button"
+                  size="sm"
+                  variant={item.id === shownExposure.id ? "secondary" : "ghost"}
+                  aria-pressed={item.id === shownExposure.id}
+                  className="max-w-48 shrink-0 rounded-full"
+                  onClick={() => setExposedId(item.id)}
+                  title={item.name}
+                >
+                  <span className="truncate">{item.name}</span>
+                </Button>
+              ))}
+            </div>
+          )}
+          {/* Keyed per file so switching files replays that file's wash from the start. */}
+          <ExposurePanel key={shownExposure.id} findings={shownExposure.findings!} report={shownExposure.report!} />
+        </div>
+      )}
     </section>
   );
 }

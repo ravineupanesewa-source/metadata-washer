@@ -1,11 +1,13 @@
 import { ERROR_TEXT } from "../strings";
 import {
+  FINDINGS_HEADER,
   REPORT_HEADER,
+  metadataFindingsSchema,
   apiErrorSchema,
   inspectionResultSchema,
   processingReportSchema,
 } from "../schemas/api";
-import type { ProcessingReport } from "@/lib/image/types";
+import type { MetadataFindings, ProcessingReport } from "@/lib/image/types";
 import type { EngineError, SanitizerEngine } from "./types";
 
 const RETRYABLE = new Set(["BUSY", "TIMEOUT", "PROCESSING_FAILED", "NETWORK"]);
@@ -28,6 +30,17 @@ async function readError(response: Response): Promise<{ error: EngineError; repo
       error: { code: "PROCESSING_FAILED", message: "The server returned an unexpected response.", retryable: true },
       report: null,
     };
+  }
+}
+
+/** Findings are a nice-to-have: anything unreadable degrades to "no findings", never to a failure. */
+function readFindings(header: string | null): MetadataFindings | null {
+  if (!header) return null;
+  try {
+    const parsed = metadataFindingsSchema.safeParse(JSON.parse(decodeBase64Url(header)));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
   }
 }
 
@@ -55,7 +68,12 @@ export function createHttpEngine(baseUrl = ""): SanitizerEngine {
       if (!response.ok) return { ok: false, ...(await readError(response)) };
 
       const header = response.headers.get(REPORT_HEADER);
-      const parsed = header ? processingReportSchema.safeParse(JSON.parse(decodeBase64Url(header))) : null;
+      let parsed: ReturnType<typeof processingReportSchema.safeParse> | null = null;
+      try {
+        parsed = header ? processingReportSchema.safeParse(JSON.parse(decodeBase64Url(header))) : null;
+      } catch {
+        parsed = null;
+      }
       if (!parsed?.success) {
         return {
           ok: false,
@@ -64,7 +82,12 @@ export function createHttpEngine(baseUrl = ""): SanitizerEngine {
         };
       }
       const blob = await response.blob();
-      return { ok: true, report: parsed.data, blob: blob.slice(0, blob.size, parsed.data.output?.mimeType) };
+      return {
+        ok: true,
+        report: parsed.data,
+        blob: blob.slice(0, blob.size, parsed.data.output?.mimeType),
+        findings: readFindings(response.headers.get(FINDINGS_HEADER)),
+      };
     },
 
     async inspect(file, reveal, signal) {

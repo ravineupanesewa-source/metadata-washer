@@ -141,3 +141,51 @@ export interface InspectionResult {
   categories: CategoryCount[];
   tags: InspectedTag[];
 }
+
+/**
+ * Human-readable highlights of what an image was revealing before cleaning
+ * ("findings"). Unlike `ProcessingReport` these carry real metadata values, so
+ * they travel in their own response header, live only in browser memory, and
+ * are never written to ZIPs, logs or reports.
+ */
+export const FINDING_KINDS = [
+  "place",
+  "serial",
+  "owner",
+  "unique-id",
+  "thumbnail",
+  "captured",
+  "device",
+  "description",
+  "keywords",
+  "host",
+  "lens",
+  "software",
+  "edit-history",
+] as const;
+export type FindingKind = (typeof FINDING_KINDS)[number];
+
+/** What happened to the tags behind a finding. */
+export type FindingFate = "removed" | "kept" | "still-present";
+
+export interface MetadataFinding {
+  kind: FindingKind;
+  category: MetadataCategory;
+  /** Plain text, already truncated. Always rendered as text, never HTML. */
+  value: string;
+  fate: FindingFate;
+}
+
+export interface GpsFinding {
+  latitude: number;
+  longitude: number;
+  /** Metres above sea level; negative below. */
+  altitude: number | null;
+  fate: FindingFate;
+}
+
+export interface MetadataFindings {
+  version: 1;
+  gps: GpsFinding | null;
+  items: MetadataFinding[];
+}

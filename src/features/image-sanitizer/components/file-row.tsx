@@ -98,7 +98,7 @@ export function FileRow({ item, index, engine, busy, onRemove, onRetry, onDimens
           </Button>
         )}
         <div className="flex items-center">
-          {item.report && <ReportDialog name={item.name} report={item.report} />}
+          {item.report && <ReportDialog name={item.name} report={item.report} findings={item.output ? item.findings : null} />}
           {canInspect && <InspectDialog name={item.name} file={item.file} engine={engine} />}
           {canRetry && (
             <Button variant="ghost" size="icon-sm" onClick={() => onRetry(item.id)} aria-label={copy.queue.retry(item.name)} title={copy.queue.retry(item.name)}>

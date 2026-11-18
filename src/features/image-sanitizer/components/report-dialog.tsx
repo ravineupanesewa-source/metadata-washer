@@ -10,11 +10,22 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import type { ProcessingReport } from "@/lib/image/types";
+import { Separator } from "@/components/ui/separator";
+import type { MetadataFindings, ProcessingReport } from "@/lib/image/types";
 import { copy } from "../strings";
+import { ExposurePanel } from "./exposure-panel";
 import { ReportView } from "./report-view";
 
-export function ReportDialog({ name, report }: { name: string; report: ProcessingReport }) {
+export function ReportDialog({
+  name,
+  report,
+  findings = null,
+}: {
+  name: string;
+  report: ProcessingReport;
+  /** What the original revealed; only present for successfully cleaned files. */
+  findings?: MetadataFindings | null;
+}) {
   return (
     <Dialog>
       <DialogTrigger asChild>
@@ -27,6 +38,12 @@ export function ReportDialog({ name, report }: { name: string; report: Processin
           <DialogTitle className="break-all">{copy.report.title(name)}</DialogTitle>
           <DialogDescription>{copy.report.description}</DialogDescription>
         </DialogHeader>
+        {findings && (
+          <>
+            <ExposurePanel findings={findings} report={report} />
+            <Separator />
+          </>
+        )}
         <ReportView report={report} />
       </DialogContent>
     </Dialog>

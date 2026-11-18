@@ -1,4 +1,4 @@
-import type { InspectionResult, ProcessingOptions, ProcessingReport } from "@/lib/image/types";
+import type { InspectionResult, MetadataFindings, ProcessingOptions, ProcessingReport } from "@/lib/image/types";
 
 /**
  * The UI depends only on this interface, so a future in-browser (WASM)
@@ -10,7 +10,8 @@ export interface SanitizerEngine {
 }
 
 export type SanitizeResult =
-  | { ok: true; report: ProcessingReport; blob: Blob }
+  /** `findings` is null when the original revealed nothing or the header was missing/invalid. */
+  | { ok: true; report: ProcessingReport; blob: Blob; findings: MetadataFindings | null }
   | { ok: false; error: EngineError; report: ProcessingReport | null };
 
 export interface EngineError {

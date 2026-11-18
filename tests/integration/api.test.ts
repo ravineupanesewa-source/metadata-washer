@@ -3,7 +3,12 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { POST as sanitize } from "@/app/api/sanitize/route";
 import { POST as inspect } from "@/app/api/inspect/route";
-import { processingReportSchema, inspectionResultSchema, apiErrorSchema } from "@/features/image-sanitizer/schemas/api";
+import {
+  apiErrorSchema,
+  inspectionResultSchema,
+  metadataFindingsSchema,
+  processingReportSchema,
+} from "@/features/image-sanitizer/schemas/api";
 import { shutdownExifTool } from "@/lib/image/exiftool";
 
 const FIXTURES = path.resolve(import.meta.dirname, "../fixtures");
@@ -43,6 +48,24 @@ describe("POST /api/sanitize", () => {
     const body = Buffer.from(await res.arrayBuffer());
     expect(body.byteLength).toBe(report.output?.size);
     expect(body.toString("latin1")).not.toContain("SN-0042-SECRET");
+  });
+
+  it("reports what the original revealed in a separate findings header", async () => {
+    const res = await sanitize(post("sanitize", await fixture("jpeg-full-orient6.jpg")));
+    const header = res.headers.get("x-cleanframe-findings");
+    expect(header).toBeTruthy();
+    const findings = metadataFindingsSchema.parse(JSON.parse(Buffer.from(header!, "base64url").toString("utf8")));
+    expect(findings.gps).toMatchObject({ latitude: 27.7172, longitude: 85.324, fate: "removed" });
+    const values = Object.fromEntries(findings.items.map((i) => [i.kind, i.value]));
+    expect(values).toMatchObject({ place: "Kathmandu", serial: "SN-0042-SECRET", owner: "Jane Fixture", device: "FixtureCam FC-1000" });
+    // The report stays value-free: it is what gets persisted into ZIPs.
+    expect(JSON.stringify(decodeReport(res))).not.toContain("SN-0042-SECRET");
+  });
+
+  it("sends no findings header when the image had no metadata", async () => {
+    const res = await sanitize(post("sanitize", await fixture("jpeg-clean.jpg")));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-cleanframe-findings")).toBeNull();
   });
 
   it("honours strict mode", async () => {
