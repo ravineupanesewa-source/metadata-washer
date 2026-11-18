@@ -2,7 +2,7 @@ import "server-only";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { ExifTool, ExifToolTask, exiftoolPath } from "exiftool-vendored";
+import { DefaultExiftoolArgs, ExifTool, ExifToolTask, exiftoolPath } from "exiftool-vendored";
 import { getServerConfig } from "../config/server-config";
 import { parseExifToolJson, type ClassifiedTag } from "./classify";
 
@@ -22,8 +22,10 @@ function perlOptions() {
   return {
     checkPerl: false,
     ignoreShebang: true,
+    // A custom factory replaces the library's, so it must pass `-stay_open True -@ -` itself;
+    // without them ExifTool exits/hangs instead of serving the batch protocol.
     processFactory: async () =>
-      spawn(perl, [await exiftoolPath()], {
+      spawn(/*turbopackIgnore: true*/ perl, [await exiftoolPath(), ...DefaultExiftoolArgs], {
         stdio: "pipe" as const,
         shell: false,
         windowsHide: true,
